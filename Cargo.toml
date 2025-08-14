@@ -1,0 +1,3 @@
+[workspace]
+members = ["twz-shared", "twz-conductor", "twz-cellserver", "twz-gateway"]
+resolver = "2"

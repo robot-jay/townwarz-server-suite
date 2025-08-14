@@ -1,0 +1,37 @@
+# Rust build output
+/target/
+
+# Rust backup files
+**/*.rs.bk
+
+# Cargo lock for libraries (keep Cargo.lock for apps)
+# Uncomment the next line if this will be a published library crate
+# Cargo.lock
+
+# IntelliJ / CLion / RustRover
+.idea/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Node modules (in case you ever npm install in client)
+client/node_modules/
+
+# Build artifacts for client if using a bundler
+client/dist/
+client/build/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp

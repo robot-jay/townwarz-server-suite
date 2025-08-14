@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>TownWarz Debug Client (Gateway)</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #111;
+            color: #ddd;
+            font-family: system-ui, sans-serif;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #hud {
+            position: fixed;
+            left: 8px;
+            top: 8px;
+            background: rgba(0, 0, 0, .6);
+            padding: 8px 10px;
+            border: 1px solid #333;
+            border-radius: 6px;
+            font-size: 12px;
+            max-width: 45vw;
+        }
+
+        #log {
+            margin-top: 6px;
+            max-height: 22vh;
+            overflow: auto;
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            font-size: 11px;
+            line-height: 1.25;
+            background: #0008;
+            padding: 6px;
+            border: 1px solid #333;
+        }
+
+        .ok {
+            color: #9f6;
+        }
+
+        .warn {
+            color: #fc6;
+        }
+
+        .err {
+            color: #f66;
+        }
+
+        button {
+            background: #222;
+            color: #ddd;
+            border: 1px solid #444;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #2a2a2a;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="hud">
+        <div><b>Status:</b> <span id="status" class="warn">connecting…</span></div>
+        <div><b>Player ID:</b> <span id="pid">-</span></div>
+        <div><b>Ping:</b> <span id="ping">-</span> ms</div>
+        <div><b>FPS:</b> <span id="fps">-</span></div>
+        <div><b>Pos:</b> <span id="pos">-,-</span> &nbsp; <b>Angle:</b> <span id="ang">-</span></div>
+        <div><b>Last tick:</b> <span id="tick">-</span></div>
+        <div><b>Controls:</b> WASD move • Space/LMB shoot</div>
+        <div style="margin-top:6px;">
+            <button id="btnResync" title="Send a ping and clear local state">Resync</button>
+        </div>
+        <div id="log"></div>
+    </div>
+
+    <canvas id="c"></canvas>
+
+    <script>
+        (() => {
+            // ---- config
+            const WS_URL = "ws://localhost:8081/ws"; // gateway entry
+            const SEND_INTERVAL_MS = 50;
+            const PING_INTERVAL_MS = 1000;
+            const PLAYER_SIZE = 14;
+            const BULLET_SIZE = 4;
+            const WORLD_SCALE = 1;
+            const TILE = 48;
+            const VIEW_TILES_W = 24;
+            const VIEW_TILES_H = 16;
+
+            // ---- dom
+            const canvas = document.getElementById('c');
+            const ctx = canvas.getContext('2d');
+            const statusEl = document.getElementById('status');
+            const pidEl = document.getElementById('pid');
+            const pingEl = document.getElementById('ping');
+            const fpsEl = document.getElementById('fps');
+            const tickEl = document.getElementById('tick');
+            const logEl = document.getElementById('log');
+            const btnResync = document.getElementById('btnResync');
+            const posEl = document.getElementById('pos');
+            const angEl = document.getElementById('ang');
+
+            const rad2deg = r => (r * 180 / Math.PI + 360) % 360;
+
+            function resizeCanvasToTiles(cols, rows) {
+                const dpr = window.devicePixelRatio || 1;
+                const cssW = cols * TILE;
+                const cssH = rows * TILE;
+                canvas.style.width = cssW + 'px';
+                canvas.style.height = cssH + 'px';
+                canvas.width = Math.floor(cssW * dpr);
+                canvas.height = Math.floor(cssH * dpr);
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                ctx.scale(dpr, dpr);
+            }
+
+            function resize() { canvas.width = innerWidth; canvas.height = innerHeight; }
+            resizeCanvasToTiles(VIEW_TILES_W, VIEW_TILES_H);
+            window.addEventListener('resize', () => resizeCanvasToTiles(VIEW_TILES_W, VIEW_TILES_H));
+
+            // ---- state
+            let ws = null;
+            let myId = null;
+            let lastState = { t: 0, me: null, players: [], bullets: [] };
+            let tileWin = null; // {ox,oy,w,h,data}
+            let keys = { w: false, a: false, s: false, d: false, shoot: false };
+            let lastPingTs = 0;
+            let meDead = false;
+            let hitFlashT = 0; // seconds remaining
+            let myHp = 100, myMaxHp = 100;
+
+            // ---- utils
+            const log = (msg, cls = '') => {
+                const div = document.createElement('div');
+                if (cls) div.className = cls;
+                div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+                logEl.appendChild(div);
+                logEl.scrollTop = logEl.scrollHeight;
+                console.log(msg);
+            };
+
+            function setStatus(text, cls) {
+                statusEl.textContent = text;
+                statusEl.className = cls || '';
+            }
+
+            // ---- ws
+            function connect() {
+                setStatus('connecting…', 'warn');
+                log(`connecting to ${WS_URL}`);
+                ws = new WebSocket(WS_URL);
+
+                ws.onopen = () => {
+                    setStatus('connected', 'ok');
+                    log('connected', 'ok');
+                };
+
+                ws.onclose = (e) => {
+                    setStatus('disconnected (retrying…)', 'warn');
+                    log(`disconnected (code ${e.code}) - retrying in 1s`, 'warn');
+                    setTimeout(connect, 1000);
+                };
+
+                ws.onerror = (e) => {
+                    setStatus('error', 'err');
+                    log(`socket error: ${e?.message || e}`, 'err');
+                };
+
+                ws.onmessage = (e) => {
+                    try {
+                        const msg = JSON.parse(e.data);
+                        if (!msg || typeof msg !== 'object') return;
+
+                        if (msg.type === 'hello') {
+                            myId = msg.id;
+                            pidEl.textContent = myId;
+                            log(`hello from backend, id=${myId}`, 'ok');
+                        } else if (msg.type === 'state') {
+                            lastState = msg;
+                            if (msg.tiles && Array.isArray(msg.tiles.data)) {
+                                tileWin = msg.tiles; // ox, oy, w, h, data[]
+                            }
+                            // events
+                            if (Array.isArray(msg.events)) {
+                                for (const ev of msg.events) {
+                                    if (ev.type === 'Hit') {
+                                        if (ev.dst === (msg.me || myId)) {
+                                            myHp = ev.hp; // server-authoritative
+                                            hitFlashT = 0.2; // brief flash
+                                        }
+                                    } else if (ev.type === 'Death') {
+                                        if (ev.id === (msg.me || myId)) {
+                                            meDead = true;
+                                        }
+                                    } else if (ev.type === 'Respawn') {
+                                        if (ev.id === (msg.me || myId)) {
+                                            meDead = false;
+                                            myHp = myMaxHp;
+                                        }
+                                    }
+                                }
+                            }
+                            tickEl.textContent = new Date(msg.t).toLocaleTimeString();
+                        } else if (msg.type === 'pong') {
+                            const rtt = Math.round(performance.now() - lastPingTs);
+                            pingEl.textContent = rtt;
+                        } else {
+                            // FYI, log unknown messages once
+                            // log(`unknown msg: ${e.data}`);
+                        }
+                    } catch (err) {
+                        log(`failed to parse message: ${err}`, 'err');
+                    }
+                };
+            }
+            connect();
+
+            // ---- input
+            const kd = e => {
+                switch (e.code) {
+                    case 'KeyW': keys.w = true; break;
+                    case 'KeyA': keys.a = true; break;
+                    case 'KeyS': keys.s = true; break;
+                    case 'KeyD': keys.d = true; break;
+                    case 'Space': keys.shoot = true; break;
+                    default: return;
+                }
+                e.preventDefault();
+            };
+            const ku = e => {
+                switch (e.code) {
+                    case 'KeyW': keys.w = false; break;
+                    case 'KeyA': keys.a = false; break;
+                    case 'KeyS': keys.s = false; break;
+                    case 'KeyD': keys.d = false; break;
+                    case 'Space': keys.shoot = false; break;
+                    default: return;
+                }
+                e.preventDefault();
+            };
+            addEventListener('keydown', kd);
+            addEventListener('keyup', ku);
+
+            addEventListener('mousedown', e => {
+                if (e.button === 0) { keys.shoot = true; e.preventDefault(); }
+            });
+            addEventListener('mouseup', e => {
+                if (e.button === 0) { keys.shoot = false; e.preventDefault(); }
+            });
+            addEventListener('contextmenu', e => e.preventDefault());
+
+            // ---- send loops
+            setInterval(() => {
+                if (!ws || ws.readyState !== 1) return;
+                ws.send(JSON.stringify({
+                    type: 'input',
+                    up: keys.w, down: keys.s, left: keys.a, right: keys.d, shoot: keys.shoot,
+                    ts: Date.now()
+                }));
+            }, SEND_INTERVAL_MS);
+
+            setInterval(() => {
+                if (!ws || ws.readyState !== 1) return;
+                lastPingTs = performance.now();
+                ws.send(JSON.stringify({ type: 'ping' }));
+            }, PING_INTERVAL_MS);
+
+            btnResync.onclick = () => {
+                if (ws && ws.readyState === 1) {
+                    ws.send(JSON.stringify({ type: 'ping' }));
+                    lastState = { t: 0, me: null, players: [], bullets: [] };
+                    log('resync requested (ping + cleared local state)', 'warn');
+                }
+            };
+
+            // ---- render
+            let lastFrame = performance.now(), fpsAcc = 0, fpsCnt = 0, fpsT = 0;
+
+            function drawPlayer(sx, sy, ang, isMe) {
+                ctx.save();
+                ctx.translate(sx, sy);
+                ctx.rotate(ang);
+                ctx.beginPath();
+                ctx.moveTo(PLAYER_SIZE, 0);
+                ctx.lineTo(-PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.6);
+                ctx.lineTo(-PLAYER_SIZE * 0.3, 0);
+                ctx.lineTo(-PLAYER_SIZE * 0.6, -PLAYER_SIZE * 0.6);
+                ctx.closePath();
+                ctx.fillStyle = isMe ? '#4cf' : '#9f6';
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            function loop() {
+                const now = performance.now();
+                const dt = (now - lastFrame) / 1000;
+                lastFrame = now;
+
+                fpsAcc += 1 / dt; fpsCnt++; fpsT += dt;
+                if (fpsT >= 0.5) { fpsEl.textContent = Math.round(fpsAcc / fpsCnt); fpsAcc = 0; fpsCnt = 0; fpsT = 0; }
+
+                ctx.fillStyle = '#111';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // camera follows "me" if present
+                let camX = 0, camY = 0;
+                let meTuple = null;
+
+                if (lastState && Array.isArray(lastState.players)) {
+                    meTuple = lastState.players.find(p => p[0] === (lastState.me || myId));
+                    if (meTuple) {
+                        camX = meTuple[1];
+                        camY = meTuple[2];
+
+                        // HUD: position and angle (1 decimal place; angle in degrees)
+                        posEl.textContent = `${meTuple[1].toFixed(1)}, ${meTuple[2].toFixed(1)}`;
+                        const angDeg = rad2deg(meTuple[3] || 0);
+                        angEl.textContent = `${angDeg.toFixed(1)}°`;
+                    }
+                }
+
+                // draw terrain tiles
+                const toSX = x => Math.round(canvas.width / 2 + (x - camX));
+                const toSY = y => Math.round(canvas.height / 2 + (y - camY));
+
+                // --- draw terrain tiles (after camera is set)
+                if (tileWin) {
+                    const { ox, oy, w, h, data } = tileWin;
+
+                    for (let j = 0; j < h; j++) {
+                        for (let i = 0; i < w; i++) {
+                            const t = data[j * w + i];
+                            // 0=ground,1=water,2=rock,3=town
+                            let fill = null;
+                            if (t === 0) fill = '#8b5a2b';      // ground (brown)
+                            else if (t === 1) fill = '#1e90ff'; // water (blue)
+                            else if (t === 2) fill = '#777777'; // rock (gray)
+                            else if (t === 3) fill = '#e0c040'; // town hall (gold)
+
+                            if (!fill) continue;
+
+                            // world position of this tile’s top-left
+                            const x0 = (ox + i) * TILE;
+                            const y0 = (oy + j) * TILE;
+
+                            const sx = toSX(x0);
+                            const sy = toSY(y0);
+
+                            // cull if completely off-screen
+                            if (sx >= canvas.width || sy >= canvas.height || sx + TILE <= 0 || sy + TILE <= 0) continue;
+
+                            ctx.fillStyle = fill;
+                            ctx.fillRect(sx, sy, TILE, TILE);
+                        }
+                    }
+                }
+
+                (function drawGrid() {
+                    ctx.save();
+                    ctx.lineWidth = 1;
+                    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+
+                    // Find the visible tile index range
+                    const halfW = canvas.width / 2;
+                    const halfH = canvas.height / 2;
+                    const leftWorld = camX - halfW;
+                    const rightWorld = camX + halfW;
+                    const topWorld = camY - halfH;
+                    const botWorld = camY + halfH;
+
+                    const leftTile = Math.floor(leftWorld / TILE);
+                    const rightTile = Math.floor(rightWorld / TILE);
+                    const topTile = Math.floor(topWorld / TILE);
+                    const botTile = Math.floor(botWorld / TILE);
+
+                    // vertical lines
+                    ctx.beginPath();
+                    for (let tx = leftTile; tx <= rightTile + 1; tx++) {
+                        const xWorld = tx * TILE;
+                        const x = Math.round(canvas.width / 2 + (xWorld - camX)) + 0.5;
+                        ctx.moveTo(x, 0);
+                        ctx.lineTo(x, canvas.height);
+                    }
+                    // horizontal lines
+                    for (let ty = topTile; ty <= botTile + 1; ty++) {
+                        const yWorld = ty * TILE;
+                        const y = Math.round(canvas.height / 2 + (yWorld - camY)) + 0.5;
+                        ctx.moveTo(0, y);
+                        ctx.lineTo(canvas.width, y);
+                    }
+                    ctx.stroke();
+                    ctx.restore();
+                })();
+
+                // players
+                if (lastState && Array.isArray(lastState.players)) {
+                    for (const p of lastState.players) {
+                        const id = p[0], x = p[1], y = p[2], ang = p[3] || 0;
+                        drawPlayer(toSX(x), toSY(y), ang, id === (lastState.me || myId));
+                        if (id === (lastState.me || myId)) {
+                            // rough hp % (fallback if not set)
+                            const hpTuple = p[4] ?? myHp; // server sends hp as 5th
+                            if (typeof hpTuple === 'number') myHp = hpTuple;
+                            const hpPct = Math.max(0, Math.min(1, myHp / myMaxHp));
+                            const barW = 40, barH = 4, sx = toSX(x) - barW / 2, sy = toSY(y) - PLAYER_SIZE - 10;
+                            ctx.fillStyle = '#000';
+                            ctx.fillRect(sx - 1, sy - 1, barW + 2, barH + 2);
+                            ctx.fillStyle = meDead ? '#555' : '#0f0';
+                            ctx.fillRect(sx, sy, barW * hpPct, barH);
+
+                            if (meDead) {
+                                ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                                ctx.font = 'bold 32px system-ui';
+                                ctx.textAlign = 'center';
+                                ctx.fillText('DEAD — respawning…', canvas.width / 2, 64);
+                            }
+                        }
+                    }
+                }
+
+                // bullets
+                if (lastState && Array.isArray(lastState.bullets)) {
+                    ctx.fillStyle = '#f55';
+                    for (const b of lastState.bullets) {
+                        const sx = toSX(b.x) - BULLET_SIZE / 2;
+                        const sy = toSY(b.y) - BULLET_SIZE / 2;
+                        ctx.fillRect(sx, sy, BULLET_SIZE, BULLET_SIZE);
+                    }
+                }
+
+                // decay flash timer
+                hitFlashT = Math.max(0, hitFlashT - (1 / 60));
+
+                // flash overlay if hit
+                if (hitFlashT > 0) {
+                    ctx.fillStyle = `rgba(255,0,0,${Math.min(0.35, hitFlashT * 1.5)})`;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+
+                requestAnimationFrame(loop);
+            }
+            requestAnimationFrame(loop);
+        })();
+    </script>
+
+</body>
+
+</html>
