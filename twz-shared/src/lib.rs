@@ -65,6 +65,7 @@ pub struct PlayerState {
     pub hp: i32,
     pub max_hp: i32,
     pub respawn_at: Option<u64>,
+    pub team: u8,
     // input hints if you want: last_input, etc
 }
 

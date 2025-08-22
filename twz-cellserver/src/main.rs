@@ -78,6 +78,7 @@ struct Player {
     transferring: bool,
     max_hp: i32,
     respawn_at: Option<u64>,
+    team: u8,      
 }
 
 type BulletId = u64;
@@ -169,6 +170,99 @@ const TOWN_GRID: i32 = 32;          // 512/16 = 32 tiles between town halls (16�
 const TOWN_OFFSET: i32 = TOWN_GRID / 2;
 const TOWN_CLEAR_RAD: i32 = 4;      // tiles of guaranteed ground around a town hall
 const TERRAIN_SEED: u64 = 0xC0FFEE_BABE_5EED; // change to remix the world
+
+// --- collision constants
+const TILE: f32 = TILE_PX;          // 48.0 px tiles (you already have TILE_PX)
+const PLAYER_RADIUS: f32 = 16.0;     // tweak to taste
+const MAX_PENETRATION_ITER: usize = 3;
+
+// what blocks whom
+impl Tile {
+    #[inline] fn blocks_player(self) -> bool {
+        matches!(self, Tile::Water | Tile::Rock | Tile::Town)
+    }
+    #[inline] fn blocks_bullet(self) -> bool {
+        matches!(self, Tile::Rock | Tile::Town)
+    }
+}
+
+// clamp utility
+#[inline] fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+fn resolve_circle_vs_tiles(world: &mut World, x: &mut f32, y: &mut f32, r: f32) {
+    // check a small neighborhood of tiles; iterate a few times in case of multiple overlaps
+    for _ in 0..MAX_PENETRATION_ITER {
+        let mut pushed = false;
+
+        let min_tx = (( *x - r) / TILE).floor() as i32;
+        let max_tx = (((*x + r) / TILE).floor() as i32) + 1;
+        let min_ty = (( *y - r) / TILE).floor() as i32;
+        let max_ty = (((*y + r) / TILE).floor() as i32) + 1;
+
+        'tileloop: for ty in min_ty..=max_ty {
+            for tx in min_tx..=max_tx {
+                let t = tile_at(world, tx, ty);
+                if !t.blocks_player() { continue; }
+
+                // tile AABB in world coords
+                let rx0 = tx as f32 * TILE;
+                let ry0 = ty as f32 * TILE;
+                let rx1 = rx0 + TILE;
+                let ry1 = ry0 + TILE;
+
+                // closest point on rect to circle center
+                let cx = clamp(*x, rx0, rx1);
+                let cy = clamp(*y, ry0, ry1);
+
+                let dx = *x - cx;
+                let dy = *y - cy;
+                let d2 = dx*dx + dy*dy;
+
+                if d2 < r*r {
+                    let d = d2.sqrt().max(0.0001);
+                    let nx = dx / d;
+                    let ny = dy / d;
+                    let pen = r - d;
+                    *x += nx * pen;
+                    *y += ny * pen;
+                    pushed = true;
+                    break 'tileloop; // re-evaluate neighborhood after one push
+                }
+            }
+        }
+        if !pushed { break; }
+    }
+}
+
+fn resolve_vs_enemy_players(
+    me_id: ClientId,
+    me_team: u8,
+    x: &mut f32,
+    y: &mut f32,
+    world_players: &std::collections::HashMap<ClientId, Player>,
+) {
+    for (pid, other) in world_players.iter() {
+        if *pid == me_id { continue; }
+        if other.team == me_team { continue; } // friendly pass-through
+        if other.hp <= 0 { continue; }         // ignore dead bodies
+
+        let dx = *x - other.x;
+        let dy = *y - other.y;
+        let d2 = dx*dx + dy*dy;
+        let min_dist = 2.0 * PLAYER_RADIUS;
+        if d2 < min_dist * min_dist {
+            let d = d2.sqrt().max(0.0001);
+            let nx = dx / d;
+            let ny = dy / d;
+            let pen = min_dist - d;
+            // Push only "me" for now; later we can split the push if we lock two bodies
+            *x += nx * pen;
+            *y += ny * pen;
+        }
+    }
+}
 
 // Tile codes
 #[repr(u8)]
@@ -627,6 +721,7 @@ async fn handoff_req_consumer(state: AppState, mut sub: async_nats::Subscriber) 
                     respawn_at: req.player.respawn_at,
                     last_cell: cell_of(req.player.x, req.player.y, 64.0),
                     transferring: false,
+                    team: req.player.team,
                 });
                 w.last_input.insert(req.player.id, Default::default());
                 w.last_shoot.insert(req.player.id, false);
@@ -795,6 +890,8 @@ async fn game_loop(
                 while let Ok(ctrl) = ctrl_rx.try_recv() {
                     match ctrl {
                         ControlMsg::Spawn(id) => {
+                            let bytes = id.as_bytes();
+                            let team = (bytes[0] ^ bytes[1] ^ bytes[2] ^ bytes[3]) & 1;
                             w.players.entry(id).or_insert(Player {
                                 x: 0.0, y: 0.0, vx: 0.0, vy: 0.0, ang: 0.0, 
                                 hp: 100,
@@ -802,6 +899,7 @@ async fn game_loop(
                                 respawn_at: None, 
                                 last_cell: (0,0),
                                 transferring: false,
+                                team,   
                             });
                             w.last_input.entry(id).or_default();
                             w.last_shoot.entry(id).or_insert(false);
@@ -860,14 +958,56 @@ async fn game_loop(
                     w.last_shoot.insert(id, s.shoot);
                 }
 
-                // integrate
-                for p in w.players.values_mut() {
-                    p.x += p.vx * dt;
-                    p.y += p.vy * dt;
+                // integrate with collisions
+                // Snapshot of players map keys to allow self-referential lookup
+                let ids_for_collision: Vec<ClientId> = w.players.keys().copied().collect();
+                for id in ids_for_collision {
+                    // Pull what we need, then release the mutable borrow of `p`
+                    let (team, mut nx, mut ny) = match w.players.get_mut(&id) {
+                        Some(p) => {
+                            if p.hp <= 0 {
+                                p.vx = 0.0; p.vy = 0.0;
+                                continue;
+                            }
+                            (p.team, p.x + p.vx * dt, p.y + p.vy * dt)
+                        }
+                        None => continue,
+                    };
+                    // `p` mutable borrow has ended here.
+
+                    // terrain collision (needs &mut World because chunks are lazily generated)
+                    resolve_circle_vs_tiles(&mut w, &mut nx, &mut ny, PLAYER_RADIUS);
+
+                    // enemy body collision (borrows players immutably)
+                    resolve_vs_enemy_players(id, team, &mut nx, &mut ny, &w.players);
+
+                    // commit back to the player
+                    if let Some(p) = w.players.get_mut(&id) {
+                        p.x = nx;
+                        p.y = ny;
+                    }
                 }
                 for b in w.bullets.values_mut() {
                     b.x += b.vx * dt;
                     b.y += b.vy * dt;
+                }
+
+                // bullets vs terrain
+                {
+                    // Kill bullets that hit solid tiles without holding an immutable borrow on w.bullets
+                    let samples: Vec<(BulletId, f32, f32)> =
+                        w.bullets.iter().map(|(bid, b)| (*bid, b.x, b.y)).collect();
+
+                    let mut to_kill: Vec<BulletId> = Vec::new();
+                    for (bid, bx, by) in samples {
+                        let t = tile_at_world(&mut w, bx, by);
+                        if t.blocks_bullet() {
+                            to_kill.push(bid);
+                        }
+                    }
+                    for bid in to_kill {
+                        w.bullets.remove(&bid);
+                    }
                 }
 
                 // create bullets
@@ -883,11 +1023,11 @@ async fn game_loop(
                 // cull bullets
                 w.bullets.retain(|_, b| b.x.abs() < 10000.0 && b.y.abs() < 10000.0);
 
-                // collisions (skip owner + grace)
+                // collisions (skip owner + grace) — bullet vs enemy players only
                 let nowms = now_millis();
                 let mut dead_bullets: Vec<BulletId> = Vec::new();
 
-                // Snapshot bullet data so we can iterate players mutably afterward
+                // Snapshot bullets (avoid borrow conflict)
                 let bullets_for_hit: Vec<(BulletId, ClientId, f32, f32, u64)> = w.bullets
                     .iter()
                     .map(|(bid, b)| (*bid, b.owner, b.x, b.y, b.born_ms))
@@ -895,12 +1035,16 @@ async fn game_loop(
 
                 for (bid, owner, bx, by, born) in bullets_for_hit {
                     if nowms.saturating_sub(born) < grace_ms { continue; }
+                    let owner_team = w.players.get(&owner).map(|p| p.team).unwrap_or(255);
+
                     for (pid, p) in w.players.iter_mut() {
                         if *pid == owner { continue; }
-                        if p.hp <= 0 { continue; } // ignore dead players
+                        if p.team == owner_team { continue; } // friendly pass-through
+                        if p.hp <= 0 { continue; }
+
+                        // circle hit vs player radius
                         let dx = bx - p.x; let dy = by - p.y;
                         if dx*dx + dy*dy <= hit_r2 {
-                            // apply damage
                             p.hp -= BULLET_DMG;
                             let hp_now = p.hp;
                             sim_events.push(ServerEvent::Hit { src: owner, dst: *pid, dmg: BULLET_DMG, hp: hp_now });
@@ -913,11 +1057,7 @@ async fn game_loop(
                         }
                     }
                 }
-
-                // Remove dead bullets after we’re done
-                for bid in dead_bullets {
-                    w.bullets.remove(&bid);
-                }
+                for bid in dead_bullets { w.bullets.remove(&bid); }
 
                 // respawn expired
                 for (pid, p) in w.players.iter_mut() {
@@ -939,10 +1079,12 @@ async fn game_loop(
                 for (id, p) in w.players.iter_mut() {
                     let ck = cell_of(p.x, p.y, CELL_W);
                     if ck != p.last_cell && !p.transferring {
+                        let bytes = id.as_bytes();
+                        let team = (bytes[0] ^ bytes[1] ^ bytes[2] ^ bytes[3]) & 1;
                         crossings.push((
                             *id,
                             ck,
-                            PlayerState { id:*id, x:p.x, y:p.y, vx:p.vx, vy:p.vy, ang:p.ang, hp:p.hp, max_hp:p.max_hp, respawn_at:p.respawn_at }
+                            PlayerState { id:*id, x:p.x, y:p.y, vx:p.vx, vy:p.vy, ang:p.ang, hp:p.hp, max_hp:p.max_hp, respawn_at:p.respawn_at, team }
                         ));
                         p.transferring = true;
                     } else {
