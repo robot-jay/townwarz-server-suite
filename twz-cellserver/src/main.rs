@@ -1,3 +1,10 @@
+use twz_shared::{
+    // spawn + town glue
+    SpawnPlayerAt, IVec2, CellKey, ClientId, ServerRegister,
+    // existing shared types referenced later in your file
+    Heartbeat, HandoffRequest, HandoffAck, RouteCellResponse, PlayerState, cell_of,
+};
+
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -16,14 +23,10 @@ use axum::{
 };
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
+use tracing::{info};
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::{mpsc, RwLock}};
-use twz_shared::{
-    cell_of, neighbor_cells, CellKey, ClientId, HandoffAck, HandoffRequest, Heartbeat,
-    PlayerState, RouteCellResponse, ServerRegister,
-};
 use uuid::Uuid;
-    use std::collections::VecDeque;
 
 /* ------------ Args ------------ */
 
@@ -148,6 +151,7 @@ struct InputMsg {
 enum ControlMsg {
     Spawn(ClientId),
     Despawn(ClientId),
+    ControlSpawnAt { player_id: ClientId, tile: IVec2 },
 }
 
 #[derive(Serialize)]
@@ -451,6 +455,11 @@ fn tile_at_world(world: &mut World, x: f32, y: f32) -> Tile {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_target(false)
+        .init();
+
     // NATS
     let nats = async_nats::connect(args.nats.clone()).await?;
     let nats_sub_req = nats.subscribe(format!("handoff.{}.req", args.id)).await?;
@@ -468,6 +477,36 @@ async fn main() -> anyhow::Result<()> {
         input_tx,
         ctrl_tx,
     };
+
+    // subscribe to spawn commands for any cell; you can filter to your owned cells inside if you want
+    {
+        let nats = state.nats.clone(); // <-- you *do* have this field per the error listing
+        tokio::spawn(async move {
+            let mut sub = match nats.subscribe("twz.cell.*.*.spawn").await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("spawn subscribe failed: {e}");
+                    return;
+                }
+            };
+
+            while let Some(msg) = sub.next().await {
+                match serde_json::from_slice::<twz_shared::SpawnPlayerAt>(&msg.payload) {
+                    Ok(cmd) => {
+                        tracing::info!("spawn request: player {:?} at tile {:?}", cmd.player_id, cmd.tile);
+                        // copy fields we need (avoid borrowing across awaits)
+                        let player_id = cmd.player_id.clone();
+                        let tile = cmd.tile;
+
+                        if let Err(e) = spawn_player_at(&player_id, tile).await {
+                            tracing::warn!("spawn failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("bad SpawnPlayerAt: {e}"),
+                }
+            }
+        });
+    }
 
     {
         let mut w = state.world.write().await;
@@ -793,8 +832,39 @@ impl RouteClient {
             .await?
             .error_for_status()?;
         let body: RouteCellResponse = r.json().await?;
+        let target_addr = self.server_http_addr(&body.owner_server_id).await?;
         Ok(body.owner_server_id)
     }
+    async fn server_http_addr(&self, server_id: &str) -> anyhow::Result<String> {
+        let r = self
+            .http
+            .get(format!("{}/server/{}", &self.base, server_id))
+            .send()
+            .await?
+            .error_for_status()?;
+        let d: ServerDetail = r.json().await?;
+        Ok(d.http_addr)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ServerDetail {
+    server_id: String,
+    http_addr: String,
+    ws_addr: String,
+    capacity_hint: u32,
+    last_heartbeat_ms: u128,
+}
+fn tile_to_world(t: IVec2) -> glam::Vec3 {
+    const TILE_SIZE: f32 = 1.0; // adjust if you keep a different scale
+    glam::Vec3::new(t.x as f32 * TILE_SIZE, 0.0, t.y as f32 * TILE_SIZE)
+}
+
+async fn spawn_player_at(player_id: &twz_shared::ClientId, tile: twz_shared::IVec2) -> anyhow::Result<()> {
+    const TILE_SIZE: f32 = 1.0;
+    let world = glam::Vec3::new(tile.x as f32 * TILE_SIZE, 0.0, tile.y as f32 * TILE_SIZE);
+    info!("(noop) spawn player {:?} at tile {:?} (world {:?}", player_id, tile, world);
+    Ok(())
 }
 
 async fn game_loop(
@@ -908,6 +978,9 @@ async fn game_loop(
                             w.players.remove(&id);
                             w.last_input.remove(&id);
                             w.last_shoot.remove(&id);
+                        }
+                        ControlMsg::ControlSpawnAt { player_id, tile } => {
+                            let world_pos = tile_to_world(tile);
                         }
                     }
                 }
@@ -1254,4 +1327,8 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+pub fn health_router() -> Router {
+    Router::new().route("/healthz", get(|| async {"ok"}))
 }

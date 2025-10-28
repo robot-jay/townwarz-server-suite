@@ -5,6 +5,56 @@ pub type ClientId = Uuid;
 
 pub type CellKey = (i32, i32);
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct IVec2 { pub x:i32, pub y:i32 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TownHall {
+    pub id: String,
+    pub cell: CellKey,
+    pub origin: IVec2, // anchor tile (top-left once you move to 3x3)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Town {
+    pub id: String,
+    pub name: String,
+    pub hall: TownHall,
+    pub created_at_ms: i64,
+    pub mayor_player_id: ClientId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTownRequest {
+    pub player_id: ClientId,
+    pub desired_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTownResponse {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub town: Option<Town>,
+    pub spawn_tile: Option<IVec2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnPlayerAt {
+    pub player_id: ClientId,
+    pub tile: IVec2,
+}
+
+// subjects
+pub const SUBJ_TOWN_CREATE: &str = "twz.town.create";
+pub fn subj_cell_spawn(cell:&CellKey) -> String {
+    format!("twz.cell.{}.{}.spawn", cell.0, cell.1)
+}
+
+// spawn logic: 1 right, 3 down from hall origin
+pub const SPAWN_OFFSET: IVec2 = IVec2 { x: 1, y: 3 };
+#[inline]
+pub fn spawn_from_hall(h: IVec2) -> IVec2 { IVec2{ x: h.x + SPAWN_OFFSET.x, y: h.y + SPAWN_OFFSET.y } }
+
 #[inline]
 pub fn cell_of(x: f32, y: f32, w: f32) -> CellKey {
     let cx = (x / w).floor() as i32;

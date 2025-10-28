@@ -221,3 +221,7 @@ async fn global_switch_listener(state: AppState) {
         }
     }
 }
+
+pub fn health_router() -> Router {
+    Router::new().route("/healthz", get(|| async {"ok"}))
+}

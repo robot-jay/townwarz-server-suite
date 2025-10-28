@@ -144,14 +144,14 @@
             let myHp = 100, myMaxHp = 100;
 
             // ---- utils
-            const log = (msg, cls = '') => {
+            /*const log = (msg, cls = '') => {
                 const div = document.createElement('div');
                 if (cls) div.className = cls;
                 div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
                 logEl.appendChild(div);
                 logEl.scrollTop = logEl.scrollHeight;
                 console.log(msg);
-            };
+            };*/
 
             function setStatus(text, cls) {
                 statusEl.textContent = text;
@@ -161,7 +161,7 @@
             // ---- ws
             function connect() {
                 setStatus('connecting…', 'warn');
-                log(`connecting to ${WS_URL}`);
+                //log(`connecting to ${WS_URL}`);
                 ws = new WebSocket(WS_URL);
 
                 ws.onopen = () => {
@@ -232,10 +232,10 @@
             // ---- input
             const kd = e => {
                 switch (e.code) {
-                    case 'KeyW': keys.w = true; break;
-                    case 'KeyA': keys.a = true; break;
-                    case 'KeyS': keys.s = true; break;
-                    case 'KeyD': keys.d = true; break;
+                    case 'ArrowUp': case 'KeyW': keys.w = true; break;
+                    case 'ArrowLeft': case 'KeyA': keys.a = true; break;
+                    case 'ArrowDown': case 'KeyS': keys.s = true; break;
+                    case 'ArrowRight': case 'KeyD': keys.d = true; break;
                     case 'Space': keys.shoot = true; break;
                     default: return;
                 }
@@ -243,10 +243,10 @@
             };
             const ku = e => {
                 switch (e.code) {
-                    case 'KeyW': keys.w = false; break;
-                    case 'KeyA': keys.a = false; break;
-                    case 'KeyS': keys.s = false; break;
-                    case 'KeyD': keys.d = false; break;
+                    case 'ArrowUp': case 'KeyW': keys.w = false; break;
+                    case 'ArrowLeft': case 'KeyA': keys.a = false; break;
+                    case 'ArrowDown': case 'KeyS': keys.s = false; break;
+                    case 'ArrowRight': case 'KeyD': keys.d = false; break;
                     case 'Space': keys.shoot = false; break;
                     default: return;
                 }
