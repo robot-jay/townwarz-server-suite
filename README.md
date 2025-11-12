@@ -31,4 +31,21 @@ cargo run -p twz-cellserver -- --id B --bind 127.0.0.1:3002 --conductor http://1
 cargo run -p twz-gateway -- --bind 0.0.0.0:8081 --conductor http://127.0.0.1:7000 --nats nats://127.0.0.1:4222
 ```
 
-Eventually I'll convert all that to a cleaner startup script, and the conductor itself will handle spawning the cell servers.
+Alternatively, you can use docker to spin up the conductor, which will itself spin up the necessary containers. For now, the conductor toml is configured to run 2 cell servers. Each container image will need to be built with separate commands:
+
+```Conductor
+docker build -t twz-conductor:local --build-arg BIN=twz-conductor -f twz-conductor/Dockerfile .
+```
+
+```Gateway
+docker build -t twz-gateway:local --build-arg BIN=twz-gateway -f twz-gateway/Dockerfile .
+```
+
+```Cellserver
+docker build -t twz-cellserver:local --build-arg BIN=twz-cellserver -f twz-cellserver/Dockerfile .
+```
+
+Then the actual conductor can be run with:
+```Powershell
+docker run --rm -it --name twz-conductor --user 0:0 --network twz_net -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD\twz-conductor\conductor.toml:/app/conductor.toml" -p 7000:7000 -e RUST_BACKTRACE=1 -e RUST_LOG=info twz-conductor:local --bind 0.0.0.0:7000 --nats nats://twz-nats:4222 --supervise --config /app/conductor.toml
+```

@@ -8,6 +8,7 @@ pub struct ServiceCfg {
     pub name: String,
     pub env: Option<Vec<String>>,
     pub port: Option<u16>,
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone)]

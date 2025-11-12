@@ -37,6 +37,9 @@ struct Args {
 
     #[arg(long, default_value = "0.0.0.0:3001")]
     bind: String,
+     
+    #[arg(long)]
+    advertise: Option<String>,
 
     #[arg(long, default_value = "http://127.0.0.1:7000")]
     conductor: String,
@@ -451,6 +454,17 @@ fn tile_at_world(world: &mut World, x: f32, y: f32) -> Tile {
     tile_at(world, tx, ty)
 }
 
+fn container_hostname() -> Option<String> {
+    // Docker puts the container ID/hostname here
+    match std::fs::read_to_string("/etc/hostname") {
+        Ok(s) => {
+            let h = s.trim();
+            if h.is_empty() { None } else { Some(h.to_string()) }
+        }
+        Err(_) => None,
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -515,13 +529,25 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // register
+    let advertise_addr = args.advertise.clone()
+    .or_else(|| {
+        if let Some((host, port)) = args.bind.rsplit_once(':') {
+            if host == "0.0.0.0" {
+                if let Some(hn) = container_hostname() {
+                    return Some(format!("{}:{}", hn, port));
+                }
+            }
+        }
+        None
+    })
+    .unwrap_or_else(|| args.bind.clone());
     let http_client = reqwest::Client::new();
     http_client
         .post(format!("{}/register", &args.conductor))
         .json(&ServerRegister {
             server_id: args.id.clone(),
-            http_addr: format!("http://{}", args.bind),
-            ws_addr: format!("ws://{}", args.bind),
+            http_addr: format!("http://{}", advertise_addr),
+            ws_addr: format!("ws://{}", advertise_addr),
             capacity_hint: 1000,
         })
         .send()

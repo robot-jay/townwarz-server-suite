@@ -2,7 +2,10 @@ use super::{ConductorCfg, ServiceCfg};
 use anyhow::{Context, Result};
 use bollard::{
     container::{
-        Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions,
+        Config as ContainerConfig,
+        CreateContainerOptions,
+        ListContainersOptions,
+        StartContainerOptions,
     },
     models::{HostConfig, PortBinding},
     network::{CreateNetworkOptions, InspectNetworkOptions},
@@ -115,13 +118,26 @@ async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Res
     }
     host_config.network_mode = Some(network.to_string());
 
-    let cfg = Config {
-        image: Some(svc.image.as_str()),
-        env: svc.env.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect()),
-        // Exposed ports: optional. Docker honors port_bindings without this.
+    // OWN the args/env first
+    let env_owned: Option<Vec<String>> = svc.env.clone();
+    let cmd_owned: Option<Vec<String>> = svc.args.clone();
+
+    // Then create borrowed views that live long enough for create_container(...)
+    let env_refs: Option<Vec<&str>> =
+        env_owned.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+    let cmd_refs: Option<Vec<&str>> =
+        cmd_owned.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+
+    let labels: HashMap<&str, &str> = HashMap::from([("twz.role", "managed")]);
+
+    // IMPORTANT: use the borrowed (&str) variants in ContainerConfig
+    let cfg = ContainerConfig {
+        image: Some(svc.image.as_str()),  // your version likely wants &str here too
+        env:   env_refs,
+        cmd:   cmd_refs,
         exposed_ports: None,
         host_config: Some(host_config),
-        labels: Some(HashMap::from([("twz.role".into(), "managed".into())])),
+        labels: Some(labels),
         ..Default::default()
     };
 

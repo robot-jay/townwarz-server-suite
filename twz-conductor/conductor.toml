@@ -5,23 +5,40 @@ project = "townwarz"
 image = "nats:alpine"
 name  = "twz-nats"
 port  = 4222
+args  = ["-js"]
 
 [gateway]
 image = "twz-gateway:local"
 name  = "twz-gateway"
-env = ["RUST_LOG=info", "NATS_URL=nats://twz-nats:4222", "HTTP_PORT=8080"]
 port = 8080
+args  = [
+  "--bind","0.0.0.0:8080",
+  "--conductor","http://twz-conductor:7000",
+  "--nats","nats://twz-nats:4222"
+]
 
 [[cellservers]]
 image = "twz-cellserver:local"
 name  = "twz-cell-A"
-env = ["RUST_LOG=info", "NATS_URL=nats://twz-nats:4222", "HTTP_PORT=3001", "CELL_ID=A"]
+env = ["RUST_LOG=info", "NATS=nats://twz-nats:4222", "NATS_URL=nats://twz-nats:4222", "HTTP_PORT=3001", "CELL_ID=A"]
 port = 3001
-args  = ["--id","A"]
+args  = [
+  "--id","A",
+  "--nats","nats://twz-nats:4222",
+  "--conductor","http://twz-conductor:7000",  
+  "--bind","0.0.0.0:3001",
+  "--advertise","twz-cell-A:3001"
+]
 
 [[cellservers]]
 image = "twz-cellserver:local"
 name  = "twz-cell-B"
 env = ["RUST_LOG=info", "NATS_URL=nats://twz-nats:4222", "HTTP_PORT=3002", "CELL_ID=B"]
 port = 3002
-args  = ["--id","B"]
+args  = [
+  "--id","B",
+  "--nats","nats://twz-nats:4222",
+  "--conductor","http://twz-conductor:7000",
+  "--bind","0.0.0.0:3002",
+  "--advertise","twz-cell-B:3002"
+]

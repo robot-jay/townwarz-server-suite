@@ -84,6 +84,8 @@ async fn client_session(state: AppState, client_ws: WebSocket) {
         Ok(a) => a, Err(e) => { eprintln!("[gateway] get server addr error: {e}"); return; }
     };
 
+    eprintln!("[gateway] ws_addr: {ws_addr}");
+
     // Track switches for this pid
     let (switch_tx, mut switch_rx) = mpsc::unbounded_channel::<String>();
     { state.switches.write().await.insert(pid.clone(), switch_tx); }
