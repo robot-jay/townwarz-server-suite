@@ -32,7 +32,6 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:7000")]
     bind: String,
 
-    /// NATS url for async-nats
     #[arg(long, default_value = "nats://127.0.0.1:4222")]
     nats: String,
     
@@ -89,9 +88,9 @@ async fn connect_nats_with_retry(url: &str, max_secs: u64) -> anyhow::Result<asy
     let parsed = url::Url::parse(url)?;
     let host = parsed.host_str().unwrap_or("localhost").to_string();
     let port = parsed.port().unwrap_or(4222);
-    // First ensure the socket is reachable (handles DNS + port-open)
+    
     wait_socket(&host, port, max_secs).await?;
-    // Then retry the actual NATS handshake a few times
+    
     let start = std::time::Instant::now();
     loop {
         match async_nats::connect(url).await {
@@ -109,7 +108,6 @@ async fn connect_nats_with_retry(url: &str, max_secs: u64) -> anyhow::Result<asy
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .with_target(false)
@@ -119,7 +117,6 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::default();
 
     if args.supervise {
-        // start supervisor in the background
         let cfg_path = args.config.clone();
         tokio::spawn(async move {
             use crate::supervisor::{Supervisor, Backend};
@@ -133,7 +130,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // === Axum HTTP router ===
     let app = Router::new()
         .route("/register", post(register))
         .route("/heartbeat", post(heartbeat))
@@ -145,7 +141,6 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = args.bind.parse()?;
     tracing::info!("Conductor HTTP listening on {}", addr);
 
-    // Serve HTTP
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -153,20 +148,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // === Async NATS + TownRegistry ===
     let nats_url = args.nats.clone();
 
-    // If you’re in supervise mode and using the default service name, give DNS a moment
     if args.supervise && nats_url.contains("twz-nats") {
-        // 30s is generous; tune as you like
         wait_socket("twz-nats", 4222, 30).await?;
     }
 
     let client = connect_nats_with_retry(&nats_url, 30).await?;
     let _js = async_nats::jetstream::new(client.clone());
 
-    // TODO: replace with your real world tile source.
-    // Format: Vec<(CellKey, Vec<(x, y, tileVal)>)>, where tileVal == 3 => Town Hall.
     let cells_with_tiles: Vec<(CellKey, Vec<(i32, i32, u8)>)> = vec![
         ((0, 0), vec![(10, 10, 3)]),
     ];
@@ -175,7 +165,6 @@ async fn main() -> anyhow::Result<()> {
     let reg = TownRegistry::new(client.clone(), halls).await?;
     reg.serve().await?;
 
-    // keep alive
     std::future::pending::<()>().await;
     Ok(())
 }
@@ -210,7 +199,6 @@ async fn heartbeat(
     }
 }
 
-// e.g. GET /route_cell/12,34
 async fn route_cell(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -227,7 +215,6 @@ async fn route_cell(
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no_servers"})));
     }
 
-    // Consistent-ish hashing: map cell -> index of sorted server_ids
     let mut ids: Vec<&String> = reg.servers.keys().collect();
     ids.sort_unstable();
 
@@ -244,7 +231,7 @@ async fn route_cell_slash(
     State(state): State<AppState>,
     Path((cx, cy)): Path<(i32, i32)>,
 ) -> impl IntoResponse {
-    // Reuse the same consistent hashing logic you already use
+    
     let reg = state.inner.read().await;
     if reg.servers.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"no_servers"})));

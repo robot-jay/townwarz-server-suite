@@ -12,7 +12,7 @@ pub struct IVec2 { pub x:i32, pub y:i32 }
 pub struct TownHall {
     pub id: String,
     pub cell: CellKey,
-    pub origin: IVec2, // anchor tile (top-left once you move to 3x3)
+    pub origin: IVec2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +50,6 @@ pub fn subj_cell_spawn(cell:&CellKey) -> String {
     format!("twz.cell.{}.{}.spawn", cell.0, cell.1)
 }
 
-// spawn logic: 1 right, 3 down from hall origin
 pub const SPAWN_OFFSET: IVec2 = IVec2 { x: 1, y: 3 };
 #[inline]
 pub fn spawn_from_hall(h: IVec2) -> IVec2 { IVec2{ x: h.x + SPAWN_OFFSET.x, y: h.y + SPAWN_OFFSET.y } }
@@ -83,8 +82,8 @@ pub fn neighbor_cells(c: CellKey) -> [CellKey; 9] {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerRegister {
     pub server_id: String,
-    pub http_addr: String, // optional metadata
-    pub ws_addr: String,   // optional metadata
+    pub http_addr: String, 
+    pub ws_addr: String, 
     pub capacity_hint: u32,
 }
 
@@ -102,8 +101,6 @@ pub struct RouteCellResponse {
     pub owner_server_id: String,
 }
 
-/* ---------- NATS handoff messages ---------- */
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlayerState {
     pub id: ClientId,
@@ -116,7 +113,6 @@ pub struct PlayerState {
     pub max_hp: i32,
     pub respawn_at: Option<u64>,
     pub team: u8,
-    // input hints if you want: last_input, etc
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

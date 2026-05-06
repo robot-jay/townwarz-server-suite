@@ -17,17 +17,14 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 fn build_docker_client() -> Result<Docker> {
-    // Prefer explicit connectors. This avoids DOCKER_HOST parsing quirks.
     #[cfg(unix)]
     {
-        // Works inside your Linux container where /var/run/docker.sock is mounted
         Ok(Docker::connect_with_unix("/var/run/docker.sock", 120, API_DEFAULT_VERSION)
             .context("connect to docker via unix socket")?)
     }
 
     #[cfg(windows)]
     {
-        // Works when you run the conductor natively on Windows during dev
         Ok(Docker::connect_with_named_pipe(r"//./pipe/docker_engine", 120, API_DEFAULT_VERSION)
             .context("connect to docker via named pipe")?)
     }
@@ -57,7 +54,6 @@ pub async fn run(cfg: ConductorCfg, interval: Duration) -> Result<()> {
 
 
 async fn ensure_network(docker: &Docker, net: &str) -> Result<()> {
-    // Simpler: just pass None for options
     if docker.inspect_network(net, None::<InspectNetworkOptions<&str>>).await.is_ok() {
         return Ok(());
     }
@@ -71,7 +67,6 @@ async fn ensure_network(docker: &Docker, net: &str) -> Result<()> {
 }
 
 async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Result<()> {
-    // Find by name (existing or stopped)
     let filters = HashMap::from([("name", vec![svc.name.as_str()])]);
     let listed = docker.list_containers(Some(ListContainersOptions {
         all: true,
@@ -91,7 +86,6 @@ async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Res
         return Ok(());
     }
 
-    // Pull remote images when not using :local tags
     if !svc.image.ends_with(":local") {
         use bollard::image::CreateImageOptions;
         let mut s = docker.create_image(
@@ -102,7 +96,6 @@ async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Res
         while let Some(_p) = s.next().await {}
     }
 
-    // HostConfig with port bindings and network
     let mut host_config = HostConfig::default();
     if let Some(port) = svc.port {
         let key = format!("{}/tcp", port);
@@ -118,11 +111,9 @@ async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Res
     }
     host_config.network_mode = Some(network.to_string());
 
-    // OWN the args/env first
     let env_owned: Option<Vec<String>> = svc.env.clone();
     let cmd_owned: Option<Vec<String>> = svc.args.clone();
 
-    // Then create borrowed views that live long enough for create_container(...)
     let env_refs: Option<Vec<&str>> =
         env_owned.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
     let cmd_refs: Option<Vec<&str>> =
@@ -130,9 +121,8 @@ async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Res
 
     let labels: HashMap<&str, &str> = HashMap::from([("twz.role", "managed")]);
 
-    // IMPORTANT: use the borrowed (&str) variants in ContainerConfig
     let cfg = ContainerConfig {
-        image: Some(svc.image.as_str()),  // your version likely wants &str here too
+        image: Some(svc.image.as_str()),
         env:   env_refs,
         cmd:   cmd_refs,
         exposed_ports: None,
@@ -141,7 +131,6 @@ async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Res
         ..Default::default()
     };
 
-    // Bollard 0.16 wants `platform` in CreateContainerOptions; pass None.
     docker.create_container(
         Some(CreateContainerOptions::<&str> { name: svc.name.as_str(), platform: None }),
         cfg,

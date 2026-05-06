@@ -1,7 +1,6 @@
 use twz_shared::{
-    // spawn + town glue
+    //spawn + town glue
     SpawnPlayerAt, IVec2, CellKey, ClientId, ServerRegister,
-    // existing shared types referenced later in your file
     Heartbeat, HandoffRequest, HandoffAck, RouteCellResponse, PlayerState, cell_of,
 };
 
@@ -28,12 +27,10 @@ use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::{mpsc, RwLock}};
 use uuid::Uuid;
 
-/* ------------ Args ------------ */
-
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(long)]
-    id: String, // "A" or "B" for step 2
+    id: String,
 
     #[arg(long, default_value = "0.0.0.0:3001")]
     bind: String,
@@ -47,8 +44,6 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:4222")]
     nats: String,
 }
-
-/* ------------ AppState ------------ */
 
 #[derive(Clone)]
 struct AppState {
@@ -114,7 +109,7 @@ struct World {
     grid_players: HashMap<CellKey, HashSet<ClientId>>,
     #[serde(skip)]
     grid_bullets: HashMap<CellKey, HashSet<BulletId>>,
-    terrain_chunks: HashMap<(i32,i32), Vec<u8>>, // each chunk is CHUNK_TILES*CHUNK_TILES bytes
+    terrain_chunks: HashMap<(i32,i32), Vec<u8>>, //each chunk is CHUNK_TILES*CHUNK_TILES bytes
 }
 
 #[derive(Debug, Clone, Default)]
@@ -170,20 +165,17 @@ enum ServerMsg<'a> {
     Pong,
 }
 
-// === Terrain constants ===
-const TILE_PX: f32 = 48.0;          // each tile is 48×48 pixels
-const CHUNK_TILES: i32 = 64;        // 64×64 tiles per cached chunk (tweakable)
-const TOWN_GRID: i32 = 32;          // 512/16 = 32 tiles between town halls (16×16 sub-grid)
+const TILE_PX: f32 = 48.0;          //each tile is 48×48 pixels
+const CHUNK_TILES: i32 = 64;        //64×64 tiles per cached chunk (tweakable)
+const TOWN_GRID: i32 = 32;          //512/16 = 32 tiles between town halls (16×16 sub-grid)
 const TOWN_OFFSET: i32 = TOWN_GRID / 2;
-const TOWN_CLEAR_RAD: i32 = 4;      // tiles of guaranteed ground around a town hall
-const TERRAIN_SEED: u64 = 0xC0FFEE_BABE_5EED; // change to remix the world
+const TOWN_CLEAR_RAD: i32 = 4;      //tiles of guaranteed ground around a town hall
+const TERRAIN_SEED: u64 = 0xC0FFEE_BABE_5EED; //change to remix the world
 
-// --- collision constants
-const TILE: f32 = TILE_PX;          // 48.0 px tiles (you already have TILE_PX)
-const PLAYER_RADIUS: f32 = 16.0;     // tweak to taste
+const TILE: f32 = TILE_PX;          //48.0 px tiles (you already have TILE_PX)
+const PLAYER_RADIUS: f32 = 16.0;     //tweak to taste
 const MAX_PENETRATION_ITER: usize = 3;
 
-// what blocks whom
 impl Tile {
     #[inline] fn blocks_player(self) -> bool {
         matches!(self, Tile::Water | Tile::Rock | Tile::Town)
@@ -193,13 +185,12 @@ impl Tile {
     }
 }
 
-// clamp utility
 #[inline] fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
     if v < lo { lo } else if v > hi { hi } else { v }
 }
 
 fn resolve_circle_vs_tiles(world: &mut World, x: &mut f32, y: &mut f32, r: f32) {
-    // check a small neighborhood of tiles; iterate a few times in case of multiple overlaps
+    //check a small neighborhood of tiles; iterate a few times in case of multiple overlaps
     for _ in 0..MAX_PENETRATION_ITER {
         let mut pushed = false;
 
@@ -213,13 +204,11 @@ fn resolve_circle_vs_tiles(world: &mut World, x: &mut f32, y: &mut f32, r: f32) 
                 let t = tile_at(world, tx, ty);
                 if !t.blocks_player() { continue; }
 
-                // tile AABB in world coords
                 let rx0 = tx as f32 * TILE;
                 let ry0 = ty as f32 * TILE;
                 let rx1 = rx0 + TILE;
                 let ry1 = ry0 + TILE;
 
-                // closest point on rect to circle center
                 let cx = clamp(*x, rx0, rx1);
                 let cy = clamp(*y, ry0, ry1);
 
@@ -235,7 +224,7 @@ fn resolve_circle_vs_tiles(world: &mut World, x: &mut f32, y: &mut f32, r: f32) 
                     *x += nx * pen;
                     *y += ny * pen;
                     pushed = true;
-                    break 'tileloop; // re-evaluate neighborhood after one push
+                    break 'tileloop;
                 }
             }
         }
@@ -252,8 +241,8 @@ fn resolve_vs_enemy_players(
 ) {
     for (pid, other) in world_players.iter() {
         if *pid == me_id { continue; }
-        if other.team == me_team { continue; } // friendly pass-through
-        if other.hp <= 0 { continue; }         // ignore dead bodies
+        if other.team == me_team { continue; } //friendly pass-through
+        if other.hp <= 0 { continue; }         //ignore dead bodies
 
         let dx = *x - other.x;
         let dy = *y - other.y;
@@ -264,14 +253,13 @@ fn resolve_vs_enemy_players(
             let nx = dx / d;
             let ny = dy / d;
             let pen = min_dist - d;
-            // Push only "me" for now; later we can split the push if we lock two bodies
             *x += nx * pen;
             *y += ny * pen;
         }
     }
 }
 
-// Tile codes
+//Tile codes
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tile {
@@ -286,7 +274,7 @@ impl Tile {
     }
 }
 
-// World coordinate <-> tile/chunk helpers
+//World coordinate <-> tile/chunk helpers
 #[inline] fn world_to_tile(x: f32, y: f32) -> (i32, i32) {
     let tx = (x / TILE_PX).floor() as i32;
     let ty = (y / TILE_PX).floor() as i32;
@@ -307,27 +295,27 @@ impl Tile {
     (tx - cx * CHUNK_TILES, ty - cy * CHUNK_TILES)
 }
 
-// simple 2D hash -> [0,1)
+//simple 2D hash -> [0,1)
 #[inline] fn hash2(x: i32, y: i32, seed: u64) -> f32 {
     let mut z = (x as u64).wrapping_mul(0x9E3779B97F4A7C15)
           ^ (y as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)
           ^ seed;
-    // splitmix64
+    //splitmix64
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     let v = z ^ (z >> 31);
-    // map lower 24 bits to [0,1)
+    //map lower 24 bits to [0,1)
     ((v & 0xFFFFFF) as f32) / 16_777_216.0
 }
 
 #[inline] fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
 
 #[inline] fn smoothstep(t: f32) -> f32 {
-    // smoother interpolation
+    //smoother interpolation
     t * t * (3.0 - 2.0 * t)
 }
 
-// value noise with bilinear smoothing at integer lattice
+//value noise with bilinear smoothing at integer lattice
 fn value_noise(x: f32, y: f32, seed: u64) -> f32 {
     let x0 = x.floor() as i32;
     let y0 = y.floor() as i32;
@@ -347,10 +335,10 @@ fn value_noise(x: f32, y: f32, seed: u64) -> f32 {
     lerp(ix0, ix1, sy)
 }
 
-// basic fBM (fractal brownian motion) for blob shapes
+//basic fBM (fractal brownian motion) for blob shapes
 fn fbm(mut x: f32, mut y: f32, seed: u64) -> f32 {
     let mut amp = 1.0;
-    let mut freq = 1.0 / 12.0;  // base period ~12 tiles
+    let mut freq = 1.0 / 12.0;  //base period ~12 tiles
     let mut sum = 0.0;
     let mut norm = 0.0;
     for _ in 0..4 {
@@ -364,14 +352,12 @@ fn fbm(mut x: f32, mut y: f32, seed: u64) -> f32 {
 
 #[inline]
 fn is_town_tile(tx: i32, ty: i32) -> bool {
-    // Towns live on the offset lattice: (tx,ty) ≡ (TOWN_OFFSET,TOWN_OFFSET) (mod TOWN_GRID)
     (tx - TOWN_OFFSET).rem_euclid(TOWN_GRID) == 0 &&
     (ty - TOWN_OFFSET).rem_euclid(TOWN_GRID) == 0
 }
 
 #[inline]
 fn near_town_clear(tx: i32, ty: i32) -> bool {
-    // Distance (in tiles) to the nearest offset lattice point on each axis
     let rx = (tx - TOWN_OFFSET).rem_euclid(TOWN_GRID);
     let ry = (ty - TOWN_OFFSET).rem_euclid(TOWN_GRID);
     let dx = rx.min(TOWN_GRID - rx);
@@ -379,7 +365,6 @@ fn near_town_clear(tx: i32, ty: i32) -> bool {
     dx <= TOWN_CLEAR_RAD && dy <= TOWN_CLEAR_RAD
 }
 
-// choose terrain deterministically
 fn terrain_at_tile(tx: i32, ty: i32) -> Tile {
     if is_town_tile(tx, ty) {
         return Tile::Town;
@@ -398,14 +383,13 @@ fn terrain_at_tile(tx: i32, ty: i32) -> Tile {
 
 }#[derive(serde::Serialize)]
 struct TileWindow {
-    ox: i32,   // top-left tile x
-    oy: i32,   // top-left tile y
+    ox: i32, 
+    oy: i32,
     w: i32,
     h: i32,
-    data: Vec<u8>, // row-major, len = w*h; values 0=ground,1=water,2=rock,3=town
+    data: Vec<u8>,
 }
 
-// avoid doing this while sending frames.
 fn collect_tile_window(world: &mut World, ox: i32, oy: i32, w: i32, h: i32) -> TileWindow {
     let mut data = Vec::with_capacity((w * h) as usize);
     for ty in oy..(oy + h) {
@@ -448,14 +432,12 @@ fn tile_at(world: &mut World, tx: i32, ty: i32) -> Tile {
     }
 }
 
-// Convenience: world pixel coords -> tile
 fn tile_at_world(world: &mut World, x: f32, y: f32) -> Tile {
     let (tx, ty) = world_to_tile(x, y);
     tile_at(world, tx, ty)
 }
 
 fn container_hostname() -> Option<String> {
-    // Docker puts the container ID/hostname here
     match std::fs::read_to_string("/etc/hostname") {
         Ok(s) => {
             let h = s.trim();
@@ -474,12 +456,10 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    // NATS
     let nats = async_nats::connect(args.nats.clone()).await?;
     let nats_sub_req = nats.subscribe(format!("handoff.{}.req", args.id)).await?;
     let nats_sub_ack = nats.subscribe(format!("handoff.{}.ack", args.id)).await?;
 
-    // App state
     let (input_tx, input_rx) = mpsc::unbounded_channel::<(ClientId, InputMsg)>();
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<ControlMsg>();
     let state = AppState {
@@ -492,9 +472,8 @@ async fn main() -> anyhow::Result<()> {
         ctrl_tx,
     };
 
-    // subscribe to spawn commands for any cell; you can filter to your owned cells inside if you want
     {
-        let nats = state.nats.clone(); // <-- you *do* have this field per the error listing
+        let nats = state.nats.clone();
         tokio::spawn(async move {
             let mut sub = match nats.subscribe("twz.cell.*.*.spawn").await {
                 Ok(s) => s,
@@ -508,7 +487,7 @@ async fn main() -> anyhow::Result<()> {
                 match serde_json::from_slice::<twz_shared::SpawnPlayerAt>(&msg.payload) {
                     Ok(cmd) => {
                         tracing::info!("spawn request: player {:?} at tile {:?}", cmd.player_id, cmd.tile);
-                        // copy fields we need (avoid borrowing across awaits)
+                        
                         let player_id = cmd.player_id.clone();
                         let tile = cmd.tile;
 
@@ -528,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
         println!("chunk (0,0) first 32 tiles: {:?}", &c[0..32.min(c.len())]);
     }
 
-    // register
+    //register
     let advertise_addr = args.advertise.clone()
     .or_else(|| {
         if let Some((host, port)) = args.bind.rsplit_once(':') {
@@ -554,21 +533,17 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .error_for_status()?;
 
-    // background: heartbeat
     tokio::spawn(heartbeat_task(
         state.clone(),
         http_client.clone(),
         args.conductor.clone(),
     ));
 
-    // background: game loop
     tokio::spawn(game_loop(state.clone(), input_rx, ctrl_rx, http_client.clone()));
 
-    // background: NATS consumers
     tokio::spawn(handoff_req_consumer(state.clone(), nats_sub_req));
     tokio::spawn(handoff_ack_consumer(state.clone(), nats_sub_ack));
 
-    // HTTP
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
@@ -581,33 +556,25 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn spawn_point_for(id: ClientId) -> (f32, f32) {
-    // Deterministic position derived from UUID bytes (no sketchy casting)
     let bytes = id.as_bytes();
-    // Use first 8 bytes as little-endian u64 for a stable hash
     let hash = u64::from_le_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3],
         bytes[4], bytes[5], bytes[6], bytes[7],
     ]);
-
-    // Turn that into a float and fold into [0, 2π)
-    // 2.3283064365386963e-10 ≈ 1 / 2^32 keeps value in a sane range before modulo
+    
     let ang = ((hash as f32) * 2.328_306_5e-10) % (std::f32::consts::PI * 2.0);
 
     let r = 200.0;
     (ang.cos() * r, ang.sin() * r)
 }
 
-/* ------------ WS ------------ */
-
 async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| client_socket(state, socket))
 }
 
 async fn client_socket(state: AppState, socket: WebSocket) {
-    // We'll parse an optional first "set_pid" message so gateway can force a stable id
     let (ws_sink, mut ws_stream) = socket.split();
 
-    // Optional pid
     let mut forced_id: Option<Uuid> = None;
     let mut prebuffer: Vec<Message> = Vec::new();
 
@@ -635,16 +602,12 @@ async fn client_socket(state: AppState, socket: WebSocket) {
     let id = forced_id.unwrap_or_else(Uuid::new_v4);
     println!("[{}] ws new client (pre-insert) id={}", state.server_id, id);
 
-    // Channel for this client
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
-    // Put sender into clients map (separate lock)
     state.clients.write().await.insert(id, tx.clone());
 
-    // Tell the game loop to spawn this player
     let _ = state.ctrl_tx.send(ControlMsg::Spawn(id));
 
-    // Writer task
     let writer = tokio::spawn({
         let mut ws_sink = ws_sink;
         async move {
@@ -654,7 +617,6 @@ async fn client_socket(state: AppState, socket: WebSocket) {
         }
     });
 
-    // Say hello immediately (state will include the player on next tick)
     let hello_txt = serde_json::to_string(&serde_json::json!({
         "v": 1,
         "type": "hello",
@@ -663,11 +625,9 @@ async fn client_socket(state: AppState, socket: WebSocket) {
     let _ = tx.send(Message::Text(hello_txt));
     println!("[{}] hello sent to {}", state.server_id, id);
 
-    // Reader task (handle any prebuffer first)
     let input_tx = state.input_tx.clone();
     let ping_sink = tx.clone();
     let reader = tokio::spawn(async move {
-        // feed any prebuffered frames (from before we knew pid)
         for m in prebuffer {
             match m {
                 Message::Text(txt) => {
@@ -676,7 +636,7 @@ async fn client_socket(state: AppState, socket: WebSocket) {
                 _ => {}
             }
         }
-        // then process stream
+
         while let Some(Ok(msg)) = ws_stream.next().await {
             match msg {
                 Message::Text(txt) => {
@@ -708,7 +668,7 @@ async fn handle_text(
     id: ClientId,
     txt: String,
 ) -> Result<(), ()> {
-    // Accept {"v":1, ...} or legacy without "v"
+    //Accept {"v":1, ...} or legacy without "v"
     #[derive(serde::Deserialize)]
     struct MaybeVersioned<T> {
         #[allow(dead_code)]
@@ -724,7 +684,7 @@ async fn handle_text(
                 let _ = input_tx.send((id, InputMsg { up, down, left, right, shoot, ts }));
             }
             ClientMsg::Ping => {
-                // reply with versioned pong
+                //reply with versioned pong
                 let pong_txt = serde_json::to_string(&serde_json::json!({
                     "v": 1,
                     "type": "pong"
@@ -735,8 +695,6 @@ async fn handle_text(
     }
     Ok(())
 }
-
-/* ------------ Heartbeat ------------ */
 
 async fn heartbeat_task(state: AppState, http: reqwest::Client, conductor: String) {
     let mut p50 = 0.0;
@@ -758,13 +716,11 @@ async fn heartbeat_task(state: AppState, http: reqwest::Client, conductor: Strin
             })
             .send()
             .await;
-        // You can update p50/p95 from tick metrics if you record them
+        //You can update p50/p95 from tick metrics if you record them
         p50 = 0.9 * p50 + 0.1 * 33.0;
         p95 = 0.9 * p95 + 0.1 * 40.0;
     }
 }
-
-/* ------------ Handoff consumers ------------ */
 
 async fn handoff_req_consumer(state: AppState, mut sub: async_nats::Subscriber) {
     while let Some(msg) = sub.next().await {
@@ -772,7 +728,6 @@ async fn handoff_req_consumer(state: AppState, mut sub: async_nats::Subscriber) 
             if req.to_server != state.server_id { continue; }
             println!("[{}] handoff req <- {} for player {}", state.server_id, req.from_server, req.player.id);
 
-            // spawn player immediately
             {
                 let mut w = state.world.write().await;
                 w.players.insert(req.player.id, Player {
@@ -792,7 +747,6 @@ async fn handoff_req_consumer(state: AppState, mut sub: async_nats::Subscriber) 
                 w.last_shoot.insert(req.player.id, false);
             }
 
-            // send ack back
             let ack = HandoffAck {
                 to_server: state.server_id.clone(),
                 from_server: req.from_server.clone(),
@@ -814,15 +768,13 @@ async fn handoff_ack_consumer(state: AppState, mut sub: async_nats::Subscriber) 
             if ack.from_server != state.server_id { continue; }
             println!("[{}] handoff ack -> {} for player {}", state.server_id, ack.to_server, ack.player_id);
 
-            // remove the player and related state while we hold the lock
             {
                 let mut w = state.world.write().await;
                 w.players.remove(&ack.player_id);
                 w.last_input.remove(&ack.player_id);
                 w.last_shoot.remove(&ack.player_id);
-            } // lock released here
+            }
 
-            // tell gateway to switch this player to the new owner
             let _ = state.nats
                 .publish(
                     format!("switch.{}", ack.player_id),
@@ -832,8 +784,6 @@ async fn handoff_ack_consumer(state: AppState, mut sub: async_nats::Subscriber) 
         }
     }
 }
-
-/* ------------ Game loop with routing + handoff ------------ */
 
 struct PendingShot {
     owner: ClientId,
@@ -882,7 +832,7 @@ struct ServerDetail {
     last_heartbeat_ms: u128,
 }
 fn tile_to_world(t: IVec2) -> glam::Vec3 {
-    const TILE_SIZE: f32 = 1.0; // adjust if you keep a different scale
+    const TILE_SIZE: f32 = 1.0;
     glam::Vec3::new(t.x as f32 * TILE_SIZE, 0.0, t.y as f32 * TILE_SIZE)
 }
 
@@ -899,7 +849,6 @@ async fn game_loop(
     mut ctrl_rx: mpsc::UnboundedReceiver<ControlMsg>,
     http_client: reqwest::Client,
 ) {
-    // --- routing helper
     #[derive(Clone)]
     struct RouteClient {
         http: reqwest::Client,
@@ -917,11 +866,10 @@ async fn game_loop(
     }
     let route = RouteClient { http: http_client.clone(), base: state.conductor.clone() };
 
-    // --- timing + config
     let mut last_sim = Instant::now();
     let mut last_net = Instant::now();
-    const SIM_DT: Duration = Duration::from_millis(16);  // ~60 Hz sim
-    const NET_DT: Duration = Duration::from_millis(33);  // ~30 Hz network
+    const SIM_DT: Duration = Duration::from_millis(16);  //~60 Hz sim
+    const NET_DT: Duration = Duration::from_millis(33);  //~30 Hz network
 
     let player_speed = 120.0;
     let turn_speed   = std::f32::consts::PI;
@@ -937,7 +885,6 @@ async fn game_loop(
 
     const CELL_W: f32 = 64.0;
 
-    // ---- rolling window for p50/p95
     struct Win {
         cap: usize,
         data: std::collections::VecDeque<f32>,
@@ -958,7 +905,7 @@ async fn game_loop(
             v[idx]
         }
     }
-    let mut tick_win = Win::new(240); // ~4s at 60Hz
+    let mut tick_win = Win::new(240); //~4s at 60Hz
     let mut last_hb = Instant::now();
 
     #[derive(Default)]
@@ -968,10 +915,7 @@ async fn game_loop(
 
     loop {
         let loop_start = Instant::now();
-
-        // ============================================================
-        // PHASE S: SIMULATION (single short WRITE; no awaits inside)
-        // ============================================================
+        
         let p0 = Instant::now();
         let mut crossings: Vec<(ClientId, CellKey, PlayerState)> = Vec::new();
         let mut sim_events: Vec<ServerEvent> = Vec::new();
@@ -982,7 +926,6 @@ async fn game_loop(
             {
                 let mut w = state.world.write().await;
 
-                // 1) control msgs
                 while let Ok(ctrl) = ctrl_rx.try_recv() {
                     match ctrl {
                         ControlMsg::Spawn(id) => {
@@ -1011,14 +954,12 @@ async fn game_loop(
                     }
                 }
 
-                // 2) ingest inputs
                 while let Ok((id, inp)) = input_rx.try_recv() {
                     if let Some(s) = w.last_input.get_mut(&id) {
                         *s = InputState { up:inp.up, down:inp.down, left:inp.left, right:inp.right, shoot:inp.shoot };
                     }
                 }
 
-                // 3) update players + collect shots
                 let ids: Vec<ClientId> = w.players.keys().copied().collect();
                 let mut pending_shots: Vec<(ClientId, f32, f32, f32, f32)> = Vec::new();
 
@@ -1028,14 +969,14 @@ async fn game_loop(
 
                     if let Some(p) = w.players.get_mut(&id) {
                         let alive = p.hp > 0;
-                        // rotate
+                        
                         let rot_dir = (s.right as i8 as f32) - (s.left as i8 as f32);
                         if alive {
                             p.ang += rot_dir * turn_speed * dt;
                             if p.ang >  std::f32::consts::PI { p.ang -= 2.0 * std::f32::consts::PI; }
                             if p.ang < -std::f32::consts::PI { p.ang += 2.0 * std::f32::consts::PI; }
                         }
-                        // forward/back
+                        
                         let fwd = if alive { (s.up as i8 as f32) - (s.down as i8 as f32) } else { 0.0 };
                         if fwd.abs() > 0.0 {
                             let dirx = p.ang.cos();
@@ -1044,7 +985,6 @@ async fn game_loop(
                             p.vy = diry * player_speed * fwd;
                         } else { p.vx = 0.0; p.vy = 0.0; }
 
-                        // shoot
                         if alive && s.shoot && !prev_shoot {
                             let dirx = p.ang.cos();
                             let diry = p.ang.sin();
@@ -1057,11 +997,8 @@ async fn game_loop(
                     w.last_shoot.insert(id, s.shoot);
                 }
 
-                // integrate with collisions
-                // Snapshot of players map keys to allow self-referential lookup
                 let ids_for_collision: Vec<ClientId> = w.players.keys().copied().collect();
                 for id in ids_for_collision {
-                    // Pull what we need, then release the mutable borrow of `p`
                     let (team, mut nx, mut ny) = match w.players.get_mut(&id) {
                         Some(p) => {
                             if p.hp <= 0 {
@@ -1072,15 +1009,11 @@ async fn game_loop(
                         }
                         None => continue,
                     };
-                    // `p` mutable borrow has ended here.
-
-                    // terrain collision (needs &mut World because chunks are lazily generated)
+                    
                     resolve_circle_vs_tiles(&mut w, &mut nx, &mut ny, PLAYER_RADIUS);
 
-                    // enemy body collision (borrows players immutably)
                     resolve_vs_enemy_players(id, team, &mut nx, &mut ny, &w.players);
 
-                    // commit back to the player
                     if let Some(p) = w.players.get_mut(&id) {
                         p.x = nx;
                         p.y = ny;
@@ -1091,9 +1024,7 @@ async fn game_loop(
                     b.y += b.vy * dt;
                 }
 
-                // bullets vs terrain
                 {
-                    // Kill bullets that hit solid tiles without holding an immutable borrow on w.bullets
                     let samples: Vec<(BulletId, f32, f32)> =
                         w.bullets.iter().map(|(bid, b)| (*bid, b.x, b.y)).collect();
 
@@ -1109,7 +1040,6 @@ async fn game_loop(
                     }
                 }
 
-                // create bullets
                 for (owner, x, y, dirx, diry) in pending_shots {
                     w.next_bullet_id += 1;
                     let bid = w.next_bullet_id;
@@ -1119,14 +1049,11 @@ async fn game_loop(
                     });
                 }
 
-                // cull bullets
                 w.bullets.retain(|_, b| b.x.abs() < 10000.0 && b.y.abs() < 10000.0);
 
-                // collisions (skip owner + grace) — bullet vs enemy players only
                 let nowms = now_millis();
                 let mut dead_bullets: Vec<BulletId> = Vec::new();
 
-                // Snapshot bullets (avoid borrow conflict)
                 let bullets_for_hit: Vec<(BulletId, ClientId, f32, f32, u64)> = w.bullets
                     .iter()
                     .map(|(bid, b)| (*bid, b.owner, b.x, b.y, b.born_ms))
@@ -1138,10 +1065,9 @@ async fn game_loop(
 
                     for (pid, p) in w.players.iter_mut() {
                         if *pid == owner { continue; }
-                        if p.team == owner_team { continue; } // friendly pass-through
+                        if p.team == owner_team { continue; } //friendly pass-through
                         if p.hp <= 0 { continue; }
 
-                        // circle hit vs player radius
                         let dx = bx - p.x; let dy = by - p.y;
                         if dx*dx + dy*dy <= hit_r2 {
                             p.hp -= BULLET_DMG;
@@ -1158,7 +1084,6 @@ async fn game_loop(
                 }
                 for bid in dead_bullets { w.bullets.remove(&bid); }
 
-                // respawn expired
                 for (pid, p) in w.players.iter_mut() {
                     if p.hp <= 0 {
                         if let Some(t) = p.respawn_at {
@@ -1174,7 +1099,6 @@ async fn game_loop(
                     }
                 }
 
-                // detect cell crossings (collect to process AFTER lock)
                 for (id, p) in w.players.iter_mut() {
                     let ck = cell_of(p.x, p.y, CELL_W);
                     if ck != p.last_cell && !p.transferring {
@@ -1191,16 +1115,13 @@ async fn game_loop(
                         p.transferring = false;
                     }
                 }
-            } // write lock dropped
+            }
         }
 
         event_buffer.extend(sim_events.drain(..));
 
         ph.sim = 1000.0 * p0.elapsed().as_secs_f32();
 
-        // ============================================================
-        // PHASE R: ROUTING (no locks) — ask conductor and publish handoffs
-        // ============================================================
         if !crossings.is_empty() {
             for (pid, ck, pstate) in crossings.drain(..) {
                 let owner = match route.owner_of(ck.0, ck.1).await {
@@ -1229,13 +1150,9 @@ async fn game_loop(
             }
         }
 
-        // ============================================================
-        // PHASE N: NETWORK SNAPSHOT + SEND (decoupled @ 30 Hz)
-        // ============================================================
         if last_net.elapsed() >= NET_DT {
             last_net = Instant::now();
 
-            // snapshot (short READ)
             let p1 = Instant::now();
             let (players_snapshot, bullets_snapshot) = {
                 let w = state.world.read().await;
@@ -1246,55 +1163,45 @@ async fn game_loop(
             };
             ph.snapshot = 1000.0 * p1.elapsed().as_secs_f32();
 
-            // serialize once
             let p3 = Instant::now();
             let players_json  = serde_json::to_string(&players_snapshot).unwrap();
             let bullets_json  = serde_json::to_string(&bullets_snapshot).unwrap();
 
-            // drain events accumulated since last NET tick
             let events_to_send: Vec<ServerEvent> = std::mem::take(&mut event_buffer);
             let events_json = serde_json::to_string(&events_to_send).unwrap();
 
             let tms = now_millis();
             ph.serialize = 1000.0 * p3.elapsed().as_secs_f32();
 
-            // send to all (no locks while sending)
             let p4 = Instant::now();
             let clients_snapshot = state.clients.read().await.clone();
 
-            // (A) Build a quick map: player_id -> (x,y,ang,hp) from players_snapshot
             use std::collections::HashMap;
             let mut pmap: HashMap<ClientId, (f32,f32,f32,i32)> = HashMap::with_capacity(players_snapshot.len());
             for (pid, x, y, ang, hp) in &players_snapshot {
                 pmap.insert(*pid, (*x, *y, *ang, *hp));
             }
 
-            // (B) Decide window size relative to your debug canvas (48px tiles).
-            // 26×18 fits nicely in 1248×864. Tweak as you like.
             const VIEW_W: i32 = 26;
             const VIEW_H: i32 = 18;
 
             for (id, ch) in clients_snapshot {
-                // find this client's position
                 let (px, py) = if let Some((x,y,_,_)) = pmap.get(&id) {
                     (*x, *y)
                 } else {
                     (0.0, 0.0)
                 };
-
-                // center window on player’s tile
+                
                 let (ptx, pty) = world_to_tile(px, py);
                 let ox = ptx - VIEW_W/2;
                 let oy = pty - VIEW_H/2;
 
-                // (C) Collect tiles with a short write lock (to populate cache if needed)
                 let tiles_json = {
                     let mut w = state.world.write().await;
                     let window = collect_tile_window(&mut w, ox, oy, VIEW_W, VIEW_H);
                     serde_json::to_string(&window).unwrap()
                 };
 
-                // (D) Send one JSON with shared arrays + per-client tiles
                 let txt = format!(
                     r#"{{"v":1,"type":"state","t":{},"me":"{}","players":{},"bullets":{},"tiles":{}}}"#,
                     tms, id, players_json, bullets_json, tiles_json
@@ -1303,8 +1210,7 @@ async fn game_loop(
                 let _ = ch.send(Message::Text(txt));
             }
             ph.send = 1000.0 * p4.elapsed().as_secs_f32();
-
-            // lightweight perf print every ~2s
+            
             if tick_i % 60 == 0 {
                 println!(
                     "[{}] ms sim={:.1} snap={:.1} ser={:.1} send={:.1} p50={:.1} p95={:.1}",
@@ -1315,9 +1221,6 @@ async fn game_loop(
             tick_i += 1;
         }
 
-        // ============================================================
-        // Sleep + heartbeat
-        // ============================================================
         let frame = loop_start.elapsed();
         ph.loop_total = 1000.0 * frame.as_secs_f32();
         tick_win.push(ph.loop_total);
@@ -1335,7 +1238,7 @@ async fn game_loop(
                 players: players_cnt,
                 bullets: bullets_cnt,
             };
-            // reuse the same reqwest client we already have
+            
             let _ = http_client
                 .post(format!("{}/heartbeat", &state.conductor))
                 .json(&hb)
