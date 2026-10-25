@@ -19,7 +19,7 @@
 cargo run -p twz-conductor -- --bind 0.0.0.0:7000
 ```
 ```NATS server
-nats-server -p 4222
+nats-server -p 4222 -js
 ```
 ```Cell server A
 cargo run -p twz-cellserver -- --id A --bind 127.0.0.1:3001 --conductor http://127.0.0.1:7000 --nats nats://127.0.0.1:4222
