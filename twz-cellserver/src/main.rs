@@ -165,6 +165,8 @@ enum ServerMsg<'a> {
     Pong,
 }
 
+const CELL_TILES: i32 = 64;
+const CELL_W: f32 = CELL_TILES as f32 * TILE_PX;
 const TILE_PX: f32 = 48.0;          //each tile is 48×48 pixels
 const CHUNK_TILES: i32 = 64;        //64×64 tiles per cached chunk (tweakable)
 const TOWN_GRID: i32 = 32;          //512/16 = 32 tiles between town halls (16×16 sub-grid)
@@ -733,7 +735,7 @@ async fn handoff_req_consumer(state: AppState, mut sub: async_nats::Subscriber) 
                     hp: req.player.hp,
                     max_hp: req.player.max_hp,
                     respawn_at: req.player.respawn_at,
-                    last_cell: cell_of(req.player.x, req.player.y, 64.0),
+                    last_cell: cell_of(req.player.x, req.player.y, CELL_W),
                     transferring: false,
                     team: req.player.team,
                 });
@@ -877,7 +879,6 @@ async fn game_loop(
     const BULLET_DMG: i32 = 20;
     const RESPAWN_MS: u64 = 3000;
 
-    const CELL_W: f32 = 64.0;
 
     struct Win {
         cap: usize,
@@ -1278,5 +1279,23 @@ mod spawn_tests {
             resolve_circle_vs_tiles(&mut world, &mut resolved_x, &mut resolved_y, PLAYER_RADIUS);
             assert_eq!((resolved_x, resolved_y), (x, y));
         }
+    }
+}
+
+#[cfg(test)]
+mod cell_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn routing_cells_span_64_tiles_on_both_axes() {
+        let boundary = 64.0 * TILE_PX;
+        assert_eq!(CELL_W, boundary);
+        assert_eq!(cell_of(0.0, 0.0, CELL_W), (0, 0));
+        assert_eq!(cell_of(boundary - 1.0, boundary - 1.0, CELL_W), (0, 0));
+        assert_eq!(cell_of(boundary, 0.0, CELL_W), (1, 0));
+        assert_eq!(cell_of(0.0, boundary, CELL_W), (0, 1));
+        assert_eq!(cell_of(-1.0, -1.0, CELL_W), (-1, -1));
+        assert_eq!(cell_of(-boundary, -boundary, CELL_W), (-1, -1));
+        assert_eq!(cell_of(-boundary - 1.0, -boundary - 1.0, CELL_W), (-2, -2));
     }
 }
