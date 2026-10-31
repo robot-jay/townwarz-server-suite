@@ -3,6 +3,8 @@ use twz_shared::{
     IVec2, CellKey, ClientId, ServerRegister, Town, BackendHello,
     TILE_PX, CELL_TILES, TOWN_GRID, TOWN_OFFSET, SUBJ_TOWN_LIST, SUBJ_CELL_SPAWN_ALL,
     Heartbeat, HandoffRequest, HandoffAck, RouteCellResponse, PlayerState, cell_of,
+    GameIdentity, PlayerGameState, PlayerAffiliation, Combatant, DamageAttribution,
+    DamageSourceKind, DamageContribution, DefeatRecord, RewardTargetKind, DOMAIN_VERSION,
 };
 
 use std::{
@@ -62,6 +64,7 @@ enum ServerEvent {
     Hit   { src: ClientId, dst: ClientId, dmg: i32, hp: i32 },
     Death { id: ClientId },
     Respawn { id: ClientId, x: f32, y: f32 },
+    Defeat { record: DefeatRecord },
 }
 
 #[derive(Clone, Serialize)]
@@ -79,7 +82,13 @@ struct Player {
     transferring: bool,
     max_hp: i32,
     respawn_at: Option<u64>,
-    team: u8,      
+    game: PlayerGameState,
+    #[serde(skip)]
+    damage_contributions: Vec<DamageContribution>,
+    #[serde(skip)]
+    transfer_target: Option<String>,
+    #[serde(skip)]
+    transfer_started_at_ms: Option<u64>,
     #[serde(skip)]
     spawn_tile: Option<IVec2>,
 }
@@ -95,6 +104,65 @@ struct Bullet {
     vy: f32,
     owner: ClientId,
     born_ms: u64,
+    credit: DamageAttribution,
+}
+
+impl Player {
+    fn new(id: ClientId, identity: GameIdentity, spawn_tile: Option<IVec2>) -> Self {
+        let (x, y) = player_spawn_point(id, spawn_tile);
+        Self {
+            x, y, vx: 0.0, vy: 0.0, ang: 0.0, hp: 100, max_hp: 100,
+            respawn_at: None, last_cell: cell_of(x, y, CELL_W),
+            transferring: false, transfer_target: None, transfer_started_at_ms: None, spawn_tile,
+            game: PlayerGameState::new(identity), damage_contributions: Vec::new(),
+        }
+    }
+
+    fn handoff_state(&self, id: ClientId) -> PlayerState {
+        PlayerState {
+            id, x: self.x, y: self.y, vx: self.vx, vy: self.vy, ang: self.ang,
+            hp: self.hp, max_hp: self.max_hp, respawn_at: self.respawn_at,
+            game: self.game.clone(), damage_contributions: self.damage_contributions.clone(),
+            spawn_tile: self.spawn_tile,
+        }
+    }
+
+    fn from_handoff(player: PlayerState) -> Self {
+        Self {
+            x: player.x, y: player.y, vx: player.vx, vy: player.vy, ang: player.ang,
+            hp: player.hp, max_hp: player.max_hp, respawn_at: player.respawn_at,
+            last_cell: cell_of(player.x, player.y, CELL_W), transferring: false,
+            transfer_target: None, transfer_started_at_ms: None, game: player.game,
+            damage_contributions: player.damage_contributions, spawn_tile: player.spawn_tile,
+        }
+    }
+
+    fn take_damage(&mut self, id: ClientId, damage: i32, credit: &DamageAttribution, now_ms: u64) -> Vec<ServerEvent> {
+        if damage <= 0 || self.hp <= 0 || self.transferring
+            || !credit.can_damage(&self.game.identity.combatant(id)) { return Vec::new(); }
+        let actual_damage = damage.min(self.hp) as u32;
+        self.hp = self.hp.saturating_sub(damage).max(0);
+        if let Some(contribution) = self.damage_contributions.iter_mut().find(|entry| entry.credit == *credit) {
+            contribution.damage = contribution.damage.saturating_add(actual_damage);
+            contribution.last_hit_at_ms = now_ms;
+        } else {
+            self.damage_contributions.push(DamageContribution { credit: credit.clone(), damage: actual_damage, last_hit_at_ms: now_ms });
+        }
+        let src = credit.beneficiary.as_ref().map(|owner| owner.player_id).unwrap_or(credit.source_entity_id);
+        let mut events = vec![ServerEvent::Hit { src, dst: id, dmg: actual_damage as i32, hp: self.hp }];
+        if self.hp == 0 {
+            self.respawn_at = Some(now_ms + 3000);
+            self.game.on_combat_death();
+            events.push(ServerEvent::Death { id });
+            events.push(ServerEvent::Defeat { record: DefeatRecord {
+                event_id: Uuid::new_v4(), target_id: id,
+                target_game_id: self.game.identity.game_id, target_kind: RewardTargetKind::Player,
+                credit: credit.clone(), contributions: std::mem::take(&mut self.damage_contributions),
+                occurred_at_ms: now_ms,
+            } });
+        }
+        events
+    }
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -150,9 +218,11 @@ struct InputMsg {
 
 #[derive(Debug, Clone)]
 enum ControlMsg {
-    Spawn { id: ClientId, town: Option<Town> },
+    Spawn { id: ClientId, town: Option<Town>, identity: GameIdentity },
     Despawn(ClientId),
     ControlSpawnAt { player_id: ClientId, tile: IVec2 },
+    AdoptHandoff(HandoffRequest),
+    AcknowledgeHandoff(HandoffAck),
 }
 
 #[derive(Serialize)]
@@ -235,14 +305,14 @@ fn resolve_circle_vs_tiles(world: &mut World, x: &mut f32, y: &mut f32, r: f32) 
 
 fn resolve_vs_enemy_players(
     me_id: ClientId,
-    me_team: u8,
+    me: &Combatant,
     x: &mut f32,
     y: &mut f32,
     world_players: &std::collections::HashMap<ClientId, Player>,
 ) {
     for (pid, other) in world_players.iter() {
         if *pid == me_id { continue; }
-        if other.team == me_team { continue; } //friendly pass-through
+        if me.is_friendly_to(&other.game.identity.combatant(*pid)) { continue; }
         if other.hp <= 0 { continue; }         //ignore dead bodies
 
         let dx = *x - other.x;
@@ -539,6 +609,56 @@ fn spawn_point_for(_id: ClientId) -> (f32, f32) {
     (tile.x as f32 * TILE_PX, tile.y as f32 * TILE_PX)
 }
 
+impl World {
+    fn attach_player(&mut self, id: ClientId, town: Option<Town>, identity: GameIdentity) {
+        // A backend reconnect after handoff attaches to the transferred state;
+        // it must never reinitialize the wallet, inventory or cooldowns.
+        let spawn_tile = town.as_ref().map(|town| twz_shared::spawn_from_hall(town.hall.origin));
+        if let Some(town) = town {
+            self.towns.retain(|existing| existing.id != town.id);
+            self.towns.push(town);
+        }
+        self.players.entry(id).or_insert_with(|| Player::new(id, identity, spawn_tile));
+        self.last_input.entry(id).or_default();
+        self.last_shoot.entry(id).or_insert(false);
+    }
+
+    fn adopt_handoff(&mut self, player: PlayerState) -> bool {
+        let id = player.id;
+        if let Some(existing) = self.players.get(&id) {
+            // Retransmission may acknowledge an already adopted player, but
+            // must not overwrite newer state or attach a different game.
+            return existing.game.identity == player.game.identity;
+        }
+        self.players.insert(id, Player::from_handoff(player));
+        self.last_input.entry(id).or_default();
+        self.last_shoot.entry(id).or_insert(false);
+        true
+    }
+
+    fn remove_player(&mut self, id: ClientId) {
+        self.players.remove(&id);
+        self.last_input.remove(&id);
+        self.last_shoot.remove(&id);
+    }
+
+    fn complete_handoff(&mut self, ack: &HandoffAck) -> bool {
+        let matches_pending = self.players.get(&ack.player_id).is_some_and(|player|
+            player.transferring && player.transfer_target.as_deref() == Some(ack.to_server.as_str()));
+        if !matches_pending { return false; }
+        if ack.accepted {
+            self.remove_player(ack.player_id);
+            true
+        } else {
+            let player = self.players.get_mut(&ack.player_id).unwrap();
+            player.transferring = false;
+            player.transfer_target = None;
+            player.transfer_started_at_ms = None;
+            false
+        }
+    }
+}
+
 fn player_spawn_point(id: ClientId, tile: Option<IVec2>) -> (f32, f32) {
     tile.map(|tile| (tile.x as f32 * TILE_PX, tile.y as f32 * TILE_PX))
         .unwrap_or_else(|| spawn_point_for(id))
@@ -582,6 +702,7 @@ async fn client_socket(state: AppState, socket: WebSocket) {
 
     let mut forced_id: Option<Uuid> = None;
     let mut initial_town: Option<Town> = None;
+    let mut initial_identity: Option<GameIdentity> = None;
     let mut prebuffer: Vec<Message> = Vec::new();
 
     if let Some(Ok(msg)) = ws_stream.next().await {
@@ -592,8 +713,9 @@ async fn client_socket(state: AppState, socket: WebSocket) {
                         if let Some(s) = v.get("id").and_then(|idv| idv.as_str()) {
                             if let Ok(parsed) = Uuid::parse_str(s) {
                                 forced_id = Some(parsed);
-                                if let Ok(BackendHello::SetPid { town, .. }) = serde_json::from_str(&txt) {
+                                if let Ok(BackendHello::SetPid { town, identity, .. }) = serde_json::from_str(&txt) {
                                     initial_town = town;
+                                    initial_identity = identity;
                                 }
                             }
                         }
@@ -615,7 +737,11 @@ async fn client_socket(state: AppState, socket: WebSocket) {
 
     state.clients.write().await.insert(id, tx.clone());
 
-    let _ = state.ctrl_tx.send(ControlMsg::Spawn { id, town: initial_town });
+    let identity = initial_identity.unwrap_or_else(|| match initial_town.as_ref() {
+        Some(town) => GameIdentity::mayor(id, town.id.clone()),
+        None => GameIdentity::debug(id),
+    });
+    let _ = state.ctrl_tx.send(ControlMsg::Spawn { id, town: initial_town, identity });
 
     let mut writer = tokio::spawn({
         let mut ws_sink = ws_sink;
@@ -629,7 +755,8 @@ async fn client_socket(state: AppState, socket: WebSocket) {
     let hello_txt = serde_json::to_string(&serde_json::json!({
         "v": 1,
         "type": "hello",
-        "id": id
+        "id": id,
+        "catalog_version": DOMAIN_VERSION
     })).unwrap();
     let _ = tx.send(Message::Text(hello_txt));
     println!("[{}] hello sent to {}", state.server_id, id);
@@ -665,13 +792,6 @@ async fn client_socket(state: AppState, socket: WebSocket) {
     }
     reader.abort();
     writer.abort();
-    {
-        state.clients.write().await.remove(&id);
-        let mut w = state.world.write().await;
-        w.players.remove(&id);
-        w.last_input.remove(&id);
-        w.last_shoot.remove(&id);
-    }
     state.clients.write().await.remove(&id);
     let _ = state.ctrl_tx.send(ControlMsg::Despawn(id));
 }
@@ -742,37 +862,7 @@ async fn handoff_req_consumer(state: AppState, mut sub: async_nats::Subscriber) 
             if req.to_server != state.server_id { continue; }
             println!("[{}] handoff req <- {} for player {}", state.server_id, req.from_server, req.player.id);
 
-            {
-                let mut w = state.world.write().await;
-                w.players.insert(req.player.id, Player {
-                    x: req.player.x,
-                    y: req.player.y,
-                    vx: req.player.vx,
-                    vy: req.player.vy,
-                    ang: req.player.ang,
-                    hp: req.player.hp,
-                    max_hp: req.player.max_hp,
-                    respawn_at: req.player.respawn_at,
-                    last_cell: cell_of(req.player.x, req.player.y, CELL_W),
-                    transferring: false,
-                    team: req.player.team,
-                    spawn_tile: req.player.spawn_tile,
-                });
-                w.last_input.insert(req.player.id, Default::default());
-                w.last_shoot.insert(req.player.id, false);
-            }
-
-            let ack = HandoffAck {
-                to_server: state.server_id.clone(),
-                from_server: req.from_server.clone(),
-                player_id: req.player.id,
-                accepted: true,
-                ts_ms: now_millis(),
-            };
-            let _ = state
-                .nats
-                .publish(format!("handoff.{}.ack", req.from_server), serde_json::to_vec(&ack).unwrap().into())
-                .await;
+            let _ = state.ctrl_tx.send(ControlMsg::AdoptHandoff(req));
         }
     }
 }
@@ -783,19 +873,7 @@ async fn handoff_ack_consumer(state: AppState, mut sub: async_nats::Subscriber) 
             if ack.from_server != state.server_id { continue; }
             println!("[{}] handoff ack -> {} for player {}", state.server_id, ack.to_server, ack.player_id);
 
-            {
-                let mut w = state.world.write().await;
-                w.players.remove(&ack.player_id);
-                w.last_input.remove(&ack.player_id);
-                w.last_shoot.remove(&ack.player_id);
-            }
-
-            let _ = state.nats
-                .publish(
-                    format!("switch.{}", ack.player_id),
-                    serde_json::to_vec(&serde_json::json!({"to_server": ack.to_server})).unwrap().into(),
-                )
-                .await;
+            let _ = state.ctrl_tx.send(ControlMsg::AcknowledgeHandoff(ack));
         }
     }
 }
@@ -806,6 +884,7 @@ struct PendingShot {
     y: f32,
     dirx: f32,
     diry: f32,
+    credit: DamageAttribution,
 }
 
 #[derive(Clone)]
@@ -884,7 +963,6 @@ async fn game_loop(
     let mut event_buffer: Vec<ServerEvent> = Vec::new();
 
     const BULLET_DMG: i32 = 20;
-    const RESPAWN_MS: u64 = 3000;
 
 
     struct Win {
@@ -921,6 +999,8 @@ async fn game_loop(
         let p0 = Instant::now();
         let mut crossings: Vec<(ClientId, CellKey, PlayerState)> = Vec::new();
         let mut sim_events: Vec<ServerEvent> = Vec::new();
+        let mut handoff_acks = Vec::new();
+        let mut switches = Vec::new();
         if last_sim.elapsed() >= SIM_DT {
             let dt = last_sim.elapsed().as_secs_f32().max(0.0001);
             last_sim = Instant::now();
@@ -930,31 +1010,20 @@ async fn game_loop(
 
                 while let Ok(ctrl) = ctrl_rx.try_recv() {
                     match ctrl {
-                        ControlMsg::Spawn { id, town } => {
-                            let bytes = id.as_bytes();
-                            let team = (bytes[0] ^ bytes[1] ^ bytes[2] ^ bytes[3]) & 1;
-                            let spawn_tile = town.as_ref().map(|town| twz_shared::spawn_from_hall(town.hall.origin));
-                            let (x, y) = player_spawn_point(id, spawn_tile);
-                            if let Some(town) = town {
-                                w.towns.retain(|existing| existing.id != town.id);
-                                w.towns.push(town);
-                            }
-                            w.players.entry(id).or_insert(Player {
-                                x, y, vx: 0.0, vy: 0.0, ang: 0.0, 
-                                hp: 100,
-                                max_hp: 100,
-                                respawn_at: None, 
-                                last_cell: cell_of(x, y, CELL_W),
-                                transferring: false,
-                                team, spawn_tile,
+                        ControlMsg::Spawn { id, town, identity } => w.attach_player(id, town, identity),
+                        ControlMsg::Despawn(id) => w.remove_player(id),
+                        ControlMsg::AdoptHandoff(request) => {
+                            let id = request.player.id;
+                            let accepted = w.adopt_handoff(request.player);
+                            handoff_acks.push(HandoffAck {
+                                to_server: state.server_id.clone(), from_server: request.from_server,
+                                player_id: id, accepted, ts_ms: now_millis(),
                             });
-                            w.last_input.entry(id).or_default();
-                            w.last_shoot.entry(id).or_insert(false);
                         }
-                        ControlMsg::Despawn(id) => {
-                            w.players.remove(&id);
-                            w.last_input.remove(&id);
-                            w.last_shoot.remove(&id);
+                        ControlMsg::AcknowledgeHandoff(ack) => {
+                            if w.complete_handoff(&ack) {
+                                switches.push((ack.player_id, ack.to_server));
+                            }
                         }
                         ControlMsg::ControlSpawnAt { player_id, tile } => {
                             if let Some(player) = w.players.get_mut(&player_id) {
@@ -972,13 +1041,14 @@ async fn game_loop(
                 }
 
                 let ids: Vec<ClientId> = w.players.keys().copied().collect();
-                let mut pending_shots: Vec<(ClientId, f32, f32, f32, f32)> = Vec::new();
+                let mut pending_shots: Vec<PendingShot> = Vec::new();
 
                 for id in ids {
                     let s = w.last_input.get(&id).cloned().unwrap_or_default();
                     let prev_shoot = *w.last_shoot.get(&id).unwrap_or(&false);
 
                     if let Some(p) = w.players.get_mut(&id) {
+                        if p.transferring { continue; }
                         let alive = p.hp > 0;
                         
                         let rot_dir = (s.right as i8 as f32) - (s.left as i8 as f32);
@@ -1001,7 +1071,10 @@ async fn game_loop(
                             let diry = p.ang.sin();
                             let x = p.x + dirx * muzzle;
                             let y = p.y + diry * muzzle;
-                            pending_shots.push((id, x, y, dirx, diry));
+                            pending_shots.push(PendingShot { owner: id, x, y, dirx, diry, credit: DamageAttribution {
+                                source_entity_id: id, source_kind: DamageSourceKind::Player,
+                                beneficiary: Some(p.game.identity.combatant(id)),
+                            } });
                         }
                     }
 
@@ -1010,20 +1083,20 @@ async fn game_loop(
 
                 let ids_for_collision: Vec<ClientId> = w.players.keys().copied().collect();
                 for id in ids_for_collision {
-                    let (team, mut nx, mut ny) = match w.players.get_mut(&id) {
+                    let (combatant, mut nx, mut ny) = match w.players.get_mut(&id) {
                         Some(p) => {
-                            if p.hp <= 0 {
+                            if p.hp <= 0 || p.transferring {
                                 p.vx = 0.0; p.vy = 0.0;
                                 continue;
                             }
-                            (p.team, p.x + p.vx * dt, p.y + p.vy * dt)
+                            (p.game.identity.combatant(id), p.x + p.vx * dt, p.y + p.vy * dt)
                         }
                         None => continue,
                     };
                     
                     resolve_circle_vs_tiles(&mut w, &mut nx, &mut ny, PLAYER_RADIUS);
 
-                    resolve_vs_enemy_players(id, team, &mut nx, &mut ny, &w.players);
+                    resolve_vs_enemy_players(id, &combatant, &mut nx, &mut ny, &w.players);
 
                     if let Some(p) = w.players.get_mut(&id) {
                         p.x = nx;
@@ -1051,12 +1124,12 @@ async fn game_loop(
                     }
                 }
 
-                for (owner, x, y, dirx, diry) in pending_shots {
+                for PendingShot { owner, x, y, dirx, diry, credit } in pending_shots {
                     w.next_bullet_id += 1;
                     let bid = w.next_bullet_id;
                     w.bullets.insert(bid, Bullet {
                         id: bid, x, y, vx: dirx * bullet_speed, vy: diry * bullet_speed,
-                        owner, born_ms: now_millis(),
+                        owner, credit, born_ms: now_millis(),
                     });
                 }
 
@@ -1065,29 +1138,20 @@ async fn game_loop(
                 let nowms = now_millis();
                 let mut dead_bullets: Vec<BulletId> = Vec::new();
 
-                let bullets_for_hit: Vec<(BulletId, ClientId, f32, f32, u64)> = w.bullets
+                let bullets_for_hit: Vec<(BulletId, DamageAttribution, f32, f32, u64)> = w.bullets
                     .iter()
-                    .map(|(bid, b)| (*bid, b.owner, b.x, b.y, b.born_ms))
+                    .map(|(bid, b)| (*bid, b.credit.clone(), b.x, b.y, b.born_ms))
                     .collect();
 
-                for (bid, owner, bx, by, born) in bullets_for_hit {
+                for (bid, credit, bx, by, born) in bullets_for_hit {
                     if nowms.saturating_sub(born) < grace_ms { continue; }
-                    let owner_team = w.players.get(&owner).map(|p| p.team).unwrap_or(255);
 
                     for (pid, p) in w.players.iter_mut() {
-                        if *pid == owner { continue; }
-                        if p.team == owner_team { continue; } //friendly pass-through
-                        if p.hp <= 0 { continue; }
+                        if p.hp <= 0 || p.transferring || !credit.can_damage(&p.game.identity.combatant(*pid)) { continue; }
 
                         let dx = bx - p.x; let dy = by - p.y;
                         if dx*dx + dy*dy <= hit_r2 {
-                            p.hp -= BULLET_DMG;
-                            let hp_now = p.hp;
-                            sim_events.push(ServerEvent::Hit { src: owner, dst: *pid, dmg: BULLET_DMG, hp: hp_now });
-                            if p.hp <= 0 && p.respawn_at.is_none() {
-                                p.respawn_at = Some(nowms + RESPAWN_MS);
-                                sim_events.push(ServerEvent::Death { id: *pid });
-                            }
+                            sim_events.extend(p.take_damage(*pid, BULLET_DMG, &credit, nowms));
                             dead_bullets.push(bid);
                             break;
                         }
@@ -1096,7 +1160,7 @@ async fn game_loop(
                 for bid in dead_bullets { w.bullets.remove(&bid); }
 
                 for (pid, p) in w.players.iter_mut() {
-                    if p.hp <= 0 {
+                    if p.hp <= 0 && !p.transferring {
                         if let Some(t) = p.respawn_at {
                             if nowms >= t {
                                 let (sx, sy) = player_spawn_point(*pid, p.spawn_tile);
@@ -1112,18 +1176,17 @@ async fn game_loop(
 
                 for (id, p) in w.players.iter_mut() {
                     let ck = cell_of(p.x, p.y, CELL_W);
-                    if ck != p.last_cell && !p.transferring {
-                        let bytes = id.as_bytes();
-                        let team = (bytes[0] ^ bytes[1] ^ bytes[2] ^ bytes[3]) & 1;
+                    let retry = p.transfer_started_at_ms.is_some_and(|started| nowms.saturating_sub(started) >= 5000);
+                    if ck != p.last_cell && (!p.transferring || retry) {
                         crossings.push((
                             *id,
                             ck,
-                            PlayerState { id:*id, x:p.x, y:p.y, vx:p.vx, vy:p.vy, ang:p.ang, hp:p.hp, max_hp:p.max_hp, respawn_at:p.respawn_at, team, spawn_tile:p.spawn_tile }
+                            p.handoff_state(*id)
                         ));
                         p.transferring = true;
-                    } else {
+                        p.transfer_started_at_ms = Some(nowms);
+                    } else if !p.transferring {
                         p.last_cell = ck;
-                        p.transferring = false;
                     }
                 }
             }
@@ -1131,15 +1194,29 @@ async fn game_loop(
 
         event_buffer.extend(sim_events.drain(..));
 
+        for ack in handoff_acks {
+            let _ = state.nats.publish(format!("handoff.{}.ack", ack.from_server), serde_json::to_vec(&ack).unwrap().into()).await;
+        }
+        for (id, to_server) in switches {
+            let _ = state.nats.publish(format!("switch.{}", id), serde_json::json!({"to_server":to_server}).to_string().into()).await;
+        }
+
         ph.sim = 1000.0 * p0.elapsed().as_secs_f32();
 
         if !crossings.is_empty() {
             for (pid, ck, pstate) in crossings.drain(..) {
                 let owner = match route.owner_of(ck.0, ck.1).await {
                     Ok(s) => s,
-                    Err(e) => { eprintln!("[{}] route owner err: {}", state.server_id, e); continue; }
+                    Err(e) => {
+                        eprintln!("[{}] route owner err: {}", state.server_id, e);
+                        if let Some(player) = state.world.write().await.players.get_mut(&pid) { player.transferring = false; }
+                        continue;
+                    }
                 };
                 if owner != state.server_id {
+                    if let Some(player) = state.world.write().await.players.get_mut(&pid) {
+                        player.transfer_target = Some(owner.clone());
+                    }
                     let req = HandoffRequest {
                         from_server: state.server_id.clone(),
                         to_server: owner.clone(),
@@ -1150,13 +1227,22 @@ async fn game_loop(
                         "[{}] -> handoff {} to {} at cell ({},{})",
                         state.server_id, req.player.id, owner, ck.0, ck.1
                     );
-                    let _ = state.nats
+                    if state.nats
                         .publish(format!("handoff.{}.req", owner),
                                  serde_json::to_vec(&req).unwrap().into())
-                        .await;
+                        .await.is_err() {
+                        if let Some(player) = state.world.write().await.players.get_mut(&pid) {
+                            player.transferring = false;
+                            player.transfer_target = None;
+                            player.transfer_started_at_ms = None;
+                        }
+                    }
                 } else {
                     let mut w = state.world.write().await;
-                    if let Some(p) = w.players.get_mut(&pid) { p.last_cell = ck; p.transferring = false; }
+                    if let Some(p) = w.players.get_mut(&pid) {
+                        p.last_cell = ck; p.transferring = false;
+                        p.transfer_target = None; p.transfer_started_at_ms = None;
+                    }
                 }
             }
         }
@@ -1165,12 +1251,13 @@ async fn game_loop(
             last_net = Instant::now();
 
             let p1 = Instant::now();
-            let (players_snapshot, bullets_snapshot, towns_snapshot) = {
+            let (players_snapshot, bullets_snapshot, towns_snapshot, game_states) = {
                 let w = state.world.read().await;
                 let players_snapshot: Vec<(ClientId, f32, f32, f32, i32)> =
                     w.players.iter().map(|(id,p)| (*id, p.x, p.y, p.ang, p.hp)).collect();
                 let bullets_snapshot: Vec<Bullet> = w.bullets.values().cloned().collect();
-                (players_snapshot, bullets_snapshot, w.towns.clone())
+                let game_states: HashMap<ClientId, PlayerGameState> = w.players.iter().map(|(id, p)| (*id, p.game.clone())).collect();
+                (players_snapshot, bullets_snapshot, w.towns.clone(), game_states)
             };
             ph.snapshot = 1000.0 * p1.elapsed().as_secs_f32();
 
@@ -1178,6 +1265,10 @@ async fn game_loop(
             let players_json  = serde_json::to_string(&players_snapshot).unwrap();
             let bullets_json  = serde_json::to_string(&bullets_snapshot).unwrap();
             let towns_json = serde_json::to_string(&towns_snapshot).unwrap();
+            let affiliations: Vec<PlayerAffiliation> = game_states.iter().map(|(id, game)| PlayerAffiliation {
+                player_id: *id, town_id: game.identity.town_id.clone(), role: game.identity.role,
+            }).collect();
+            let affiliations_json = serde_json::to_string(&affiliations).unwrap();
 
             let events_to_send: Vec<ServerEvent> = std::mem::take(&mut event_buffer);
             let events_json = serde_json::to_string(&events_to_send).unwrap();
@@ -1198,6 +1289,8 @@ async fn game_loop(
             const VIEW_H: i32 = 18;
 
             for (id, ch) in clients_snapshot {
+                let Some(game) = game_states.get(&id) else { continue; };
+                let self_json = serde_json::to_string(game).unwrap();
                 let (px, py) = if let Some((x,y,_,_)) = pmap.get(&id) {
                     (*x, *y)
                 } else {
@@ -1215,8 +1308,8 @@ async fn game_loop(
                 };
 
                 let txt = format!(
-                    r#"{{"v":1,"type":"state","t":{},"me":"{}","players":{},"bullets":{},"tiles":{},"towns":{}}}"#,
-                    tms, id, players_json, bullets_json, tiles_json, towns_json
+                    r#"{{"v":1,"type":"state","t":{},"me":"{}","players":{},"bullets":{},"tiles":{},"towns":{},"catalog_version":{},"self_state":{},"player_affiliations":{},"events":{}}}"#,
+                    tms, id, players_json, bullets_json, tiles_json, towns_json, DOMAIN_VERSION, self_json, affiliations_json, events_json
                 );
 
                 let _ = ch.send(Message::Text(txt));
@@ -1273,6 +1366,9 @@ fn now_millis() -> u64 {
 pub fn health_router() -> Router {
     Router::new().route("/healthz", get(|| async {"ok"}))
 }
+
+#[cfg(test)]
+mod state_tests;
 #[cfg(test)]
 mod spawn_tests {
     use super::*;

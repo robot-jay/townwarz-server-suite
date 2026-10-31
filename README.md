@@ -1,5 +1,7 @@
 # This is the server softwares for the Townwarz game.
 
+See [PHASE1.md](PHASE1.md) for the versioned Buildings/Items/ItemBuildings domain model, player-owned wallets and six-slot inventory, town allegiance, reward/assist extension points, and handoff-state guarantees. The read-only catalog is available at gateway `GET /catalog`.
+
 ## New-game flow and local configuration
 
 The React client now uses **`/play`** on the gateway. After Auth0 login it asks for a role (Mayor only for now) and a town name. The first WebSocket frame is:

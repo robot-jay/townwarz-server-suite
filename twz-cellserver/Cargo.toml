@@ -18,3 +18,6 @@ glam = "0.27"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 twz-shared = { path = "../twz-shared" }
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect"] }
