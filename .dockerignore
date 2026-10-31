@@ -1,0 +1,7 @@
+.git
+target
+nats-data
+.env
+.env.*
+!.env.example
+*.log

@@ -26,3 +26,5 @@ toml = "0.8"
 
 # Link to your workspace crate
 twz-shared = { path = "../twz-shared" }
+tokio-postgres = "0.7"
+dotenvy = "0.15"

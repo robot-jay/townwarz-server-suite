@@ -28,6 +28,60 @@ pub struct Town {
 pub struct CreateTownRequest {
     pub player_id: ClientId,
     pub desired_name: String,
+    pub user: GameUser,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameUser {
+    pub sub: String,
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GameEntry {
+    StartGame { id_token: String, role: String, town_name: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GameSession { pub player_id: ClientId }
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BackendHello {
+    SetPid { id: ClientId, #[serde(default)] town: Option<Town> },
+}
+
+pub const TILE_PX: f32 = 48.0;
+pub const CELL_TILES: i32 = 64;
+pub const TOWN_GRID: i32 = 32;
+pub const TOWN_OFFSET: i32 = TOWN_GRID / 2;
+
+pub fn validate_town_name(name: &str) -> Result<String, &'static str> {
+    let name = name.trim();
+    if !(2..=32).contains(&name.chars().count()) {
+        return Err("Town names must be between 2 and 32 characters.");
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '\'')) {
+        return Err("Use letters, numbers, spaces, apostrophes, or hyphens in your town name.");
+    }
+    Ok(name.to_owned())
+}
+
+// Expand a square around the origin: (0,0), (0,1), (1,1), (1,0), ...
+// These are global tile coordinates, identical to the procedural terrain grid.
+pub fn hall_for_slot(slot: i32) -> TownHall {
+    assert!(slot >= 0);
+    let edge = (slot as f64).sqrt().floor() as i32;
+    let offset = slot - edge * edge;
+    let (x, y) = if offset <= edge { (offset, edge) } else { (edge, 2 * edge - offset) };
+    let origin = IVec2 { x: TOWN_OFFSET + x * TOWN_GRID, y: TOWN_OFFSET + y * TOWN_GRID };
+    TownHall {
+        id: format!("h-{}-{}", origin.x, origin.y),
+        cell: (origin.x.div_euclid(CELL_TILES), origin.y.div_euclid(CELL_TILES)),
+        origin,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +100,10 @@ pub struct SpawnPlayerAt {
 
 // subjects
 pub const SUBJ_TOWN_CREATE: &str = "twz.town.create";
+pub const SUBJ_TOWN_LIST: &str = "twz.town.list";
+pub const SUBJ_GAME_END: &str = "twz.game.end";
+pub const SUBJ_GAME_TOUCH: &str = "twz.game.touch";
+pub const SUBJ_CELL_SPAWN_ALL: &str = "twz.cell.*.*.spawn";
 pub fn subj_cell_spawn(cell:&CellKey) -> String {
     format!("twz.cell.{}.{}.spawn", cell.0, cell.1)
 }
@@ -113,6 +171,36 @@ pub struct PlayerState {
     pub max_hp: i32,
     pub respawn_at: Option<u64>,
     pub team: u8,
+    #[serde(default)]
+    pub spawn_tile: Option<IVec2>,
+}
+
+#[cfg(test)]
+mod town_tests {
+    use super::*;
+
+    #[test]
+    fn town_names_are_trimmed_and_validated() {
+        assert_eq!(validate_town_name("  New Hope  ").unwrap(), "New Hope");
+        for name in ["", " ", "A", "<script>", "Town\nName"] {
+            assert!(validate_town_name(name).is_err());
+        }
+        assert!(validate_town_name(&"a".repeat(33)).is_err());
+        assert!(validate_town_name("Élan's Crossing-2").is_ok());
+    }
+
+    #[test]
+    fn allocated_halls_are_unique_and_match_terrain_and_routing() {
+        let mut seen = std::collections::HashSet::new();
+        for slot in 0..1000 {
+            let hall = hall_for_slot(slot);
+            assert!(seen.insert((hall.origin.x, hall.origin.y)));
+            assert_eq!((hall.origin.x - TOWN_OFFSET).rem_euclid(TOWN_GRID), 0);
+            assert_eq!((hall.origin.y - TOWN_OFFSET).rem_euclid(TOWN_GRID), 0);
+            let spawn = spawn_from_hall(hall.origin);
+            assert_eq!(cell_of(spawn.x as f32 * TILE_PX, spawn.y as f32 * TILE_PX, CELL_TILES as f32 * TILE_PX), hall.cell);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

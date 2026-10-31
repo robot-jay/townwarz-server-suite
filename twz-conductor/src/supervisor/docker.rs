@@ -30,7 +30,15 @@ fn build_docker_client() -> Result<Docker> {
     }
 }
 
-pub async fn run(cfg: ConductorCfg, interval: Duration) -> Result<()> {
+pub async fn run(mut cfg: ConductorCfg, interval: Duration) -> Result<()> {
+    let env = cfg.gateway.env.get_or_insert_with(Vec::new);
+    for name in ["AUTH0_DOMAIN", "AUTH0_CLIENT_ID"] {
+        if !env.iter().any(|entry| entry.starts_with(&format!("{name}="))) {
+            if let Ok(value) = std::env::var(name) {
+                env.push(format!("{name}={value}"));
+            }
+        }
+    }
     let docker = build_docker_client()?;
     ensure_network(&docker, &cfg.network).await?;
 
@@ -138,6 +146,7 @@ async fn ensure_service(docker: &Docker, network: &str, svc: &ServiceCfg) -> Res
     docker.start_container(svc.name.as_str(), None::<StartContainerOptions<String>>).await?;
     Ok(())
 }
+
 
 async fn wait_tcp(host: &str, port: u16, timeout: Duration) -> Result<()> {
     use tokio::net::TcpStream;

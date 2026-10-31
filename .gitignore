@@ -35,3 +35,8 @@ client/build/
 # Temporary files
 *.tmp
 *.temp
+
+# Local service configuration
+.env
+.env.*
+!.env.example

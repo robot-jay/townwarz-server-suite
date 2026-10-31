@@ -17,3 +17,5 @@ tokio-tungstenite = { version = "0.21", default-features = false, features = ["r
 tungstenite = "0.21"
 twz-shared = { path = "../twz-shared" }
 anyhow = "1.0"
+jsonwebtoken = { version = "9", default-features = false }
+dotenvy = "0.15"

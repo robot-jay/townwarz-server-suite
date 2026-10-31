@@ -20,10 +20,10 @@ use serde_json::json;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
-use twz_shared::{Heartbeat, RouteCellResponse, ServerRegister, CellKey};
+use twz_shared::{Heartbeat, RouteCellResponse, ServerRegister};
 
 mod town_registry;
-use crate::town_registry::{TownRegistry, halls_from_map};
+use crate::town_registry::TownRegistry;
 
 mod supervisor;
 
@@ -108,6 +108,7 @@ async fn connect_nats_with_retry(url: &str, max_secs: u64) -> anyhow::Result<asy
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .with_target(false)
@@ -155,14 +156,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let client = connect_nats_with_retry(&nats_url, 30).await?;
-    let _js = async_nats::jetstream::new(client.clone());
-
-    let cells_with_tiles: Vec<(CellKey, Vec<(i32, i32, u8)>)> = vec![
-        ((0, 0), vec![(10, 10, 3)]),
-    ];
-
-    let halls = halls_from_map(&cells_with_tiles);
-    let reg = TownRegistry::new(client.clone(), halls).await?;
+    let database_url = std::env::var("DATABASE_URL")
+        .map_err(|_| anyhow::anyhow!("Set DATABASE_URL in the server suite .env file"))?;
+    let reg = TownRegistry::new(client.clone(), &database_url).await?;
     reg.serve().await?;
 
     std::future::pending::<()>().await;
