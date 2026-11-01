@@ -1,29 +1,29 @@
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    hash::{Hash, Hasher},
-    collections::hash_map::DefaultHasher,
-    time::Duration
-};
-use tokio::{net::TcpStream, time::sleep, sync::RwLock};
+use axum::http::StatusCode;
 use axum::{
     extract::{Path, State},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use axum::http::StatusCode;
 use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
+use std::{
+    collections::hash_map::DefaultHasher,
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{net::TcpStream, sync::RwLock, time::sleep};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use twz_shared::{Heartbeat, RouteCellResponse, ServerRegister};
 
-mod town_registry;
 mod persistence;
+mod town_registry;
 use crate::town_registry::TownRegistry;
 
 mod supervisor;
@@ -35,7 +35,7 @@ struct Args {
 
     #[arg(long, default_value = "nats://127.0.0.1:4222")]
     nats: String,
-    
+
     #[arg(long, default_value = "false")]
     supervise: bool,
 
@@ -64,9 +64,10 @@ struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        Self { inner: Arc::new(RwLock::new(Registry::default())) }
+        Self {
+            inner: Arc::new(RwLock::new(Registry::default())),
+        }
     }
-
 }
 
 async fn wait_socket(host: &str, port: u16, max_secs: u64) -> anyhow::Result<()> {
@@ -89,9 +90,9 @@ async fn connect_nats_with_retry(url: &str, max_secs: u64) -> anyhow::Result<asy
     let parsed = url::Url::parse(url)?;
     let host = parsed.host_str().unwrap_or("localhost").to_string();
     let port = parsed.port().unwrap_or(4222);
-    
+
     wait_socket(&host, port, max_secs).await?;
-    
+
     let start = std::time::Instant::now();
     loop {
         match async_nats::connect(url).await {
@@ -121,8 +122,10 @@ async fn main() -> anyhow::Result<()> {
     if args.supervise {
         let cfg_path = args.config.clone();
         tokio::spawn(async move {
-            use crate::supervisor::{Supervisor, Backend};
-            if let Ok(sup) = Supervisor::from_toml_file(Backend::Docker, cfg_path, Duration::from_secs(10)) {
+            use crate::supervisor::{Backend, Supervisor};
+            if let Ok(sup) =
+                Supervisor::from_toml_file(Backend::Docker, cfg_path, Duration::from_secs(10))
+            {
                 if let Err(e) = sup.run().await {
                     tracing::error!("supervisor error: {e:#}");
                 }
@@ -136,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/register", post(register))
         .route("/heartbeat", post(heartbeat))
         .route("/route_cell/:id", get(route_cell))
-        .route("/route/cell/:cx/:cy", get(route_cell_slash)) 
+        .route("/route/cell/:cx/:cy", get(route_cell_slash))
         .route("/server/:id", get(get_server))
         .with_state(state.clone());
 
@@ -192,24 +195,36 @@ async fn heartbeat(
         s.last_heartbeat_ms = now_ms();
         (StatusCode::OK, Json(json!({"ok":true})))
     } else {
-        (StatusCode::NOT_FOUND, Json(json!({"ok":false,"error":"unknown_server"})))
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok":false,"error":"unknown_server"})),
+        )
     }
 }
 
-async fn route_cell(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn route_cell(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let parts: Vec<_> = id.split(',').collect();
     if parts.len() != 2 {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad_cell_id"})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"bad_cell_id"})),
+        );
     }
-    let cx: i32 = match parts[0].parse() { Ok(v) => v, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad_cell_x"}))) };
-    let cy: i32 = match parts[1].parse() { Ok(v) => v, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad_cell_y"}))) };
+    let cx: i32 = match parts[0].parse() {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad_cell_x"}))),
+    };
+    let cy: i32 = match parts[1].parse() {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad_cell_y"}))),
+    };
 
     let reg = state.inner.read().await;
     if reg.servers.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"no_servers"})));
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"no_servers"})),
+        );
     }
 
     let mut ids: Vec<&String> = reg.servers.keys().collect();
@@ -220,7 +235,9 @@ async fn route_cell(
     let idx = (hasher.finish() as usize) % ids.len();
     let owner_server_id = ids[idx].clone();
 
-    let resp = RouteCellResponse { owner_server_id: owner_server_id.clone() };
+    let resp = RouteCellResponse {
+        owner_server_id: owner_server_id.clone(),
+    };
     (StatusCode::OK, Json(serde_json::to_value(resp).unwrap()))
 }
 
@@ -228,10 +245,12 @@ async fn route_cell_slash(
     State(state): State<AppState>,
     Path((cx, cy)): Path<(i32, i32)>,
 ) -> impl IntoResponse {
-    
     let reg = state.inner.read().await;
     if reg.servers.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"no_servers"})));
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"no_servers"})),
+        );
     }
 
     let mut ids: Vec<&String> = reg.servers.keys().collect();
@@ -242,7 +261,9 @@ async fn route_cell_slash(
     let idx = (hasher.finish() as usize) % ids.len();
     let owner_server_id = ids[idx].clone();
 
-    let resp = RouteCellResponse { owner_server_id: owner_server_id.clone() };
+    let resp = RouteCellResponse {
+        owner_server_id: owner_server_id.clone(),
+    };
     (StatusCode::OK, Json(serde_json::to_value(resp).unwrap()))
 }
 
@@ -254,11 +275,17 @@ async fn get_server(
     if let Some(s) = reg.servers.get(&id) {
         Ok(Json(s.clone()))
     } else {
-        Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"not_found"}))))
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"not_found"})),
+        ))
     }
 }
 
 fn now_ms() -> u128 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }

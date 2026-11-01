@@ -3,14 +3,14 @@
 mod catalog;
 mod combat;
 mod entities;
-mod player;
 mod geometry;
+mod player;
 
 pub use catalog::*;
 pub use combat::*;
 pub use entities::*;
-pub use player::*;
 pub use geometry::*;
+pub use player::*;
 
 pub type TownId = String;
 pub type GameId = uuid::Uuid;

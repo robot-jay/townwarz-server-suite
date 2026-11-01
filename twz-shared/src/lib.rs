@@ -9,7 +9,10 @@ pub type ClientId = Uuid;
 pub type CellKey = (i32, i32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IVec2 { pub x:i32, pub y:i32 }
+pub struct IVec2 {
+    pub x: i32,
+    pub y: i32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TownHall {
@@ -44,22 +47,35 @@ pub struct GameUser {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameEntry {
-    StartGame { id_token: String, role: String, town_name: String },
-    ResumeGame { id_token: String },
-    QuitGame { id_token: String },
+    StartGame {
+        id_token: String,
+        role: String,
+        town_name: String,
+    },
+    ResumeGame {
+        id_token: String,
+    },
+    QuitGame {
+        id_token: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GameSession { pub player_id: ClientId }
+pub struct GameSession {
+    pub player_id: ClientId,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendHello {
     SetPid {
         id: ClientId,
-        #[serde(default)] town: Option<Town>,
-        #[serde(default)] identity: Option<GameIdentity>,
-        #[serde(default)] resume_state: Option<PlayerState>,
+        #[serde(default)]
+        town: Option<Town>,
+        #[serde(default)]
+        identity: Option<GameIdentity>,
+        #[serde(default)]
+        resume_state: Option<PlayerState>,
     },
 }
 
@@ -73,7 +89,10 @@ pub fn validate_town_name(name: &str) -> Result<String, &'static str> {
     if !(2..=32).contains(&name.chars().count()) {
         return Err("Town names must be between 2 and 32 characters.");
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '\'')) {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '\''))
+    {
         return Err("Use letters, numbers, spaces, apostrophes, or hyphens in your town name.");
     }
     Ok(name.to_owned())
@@ -85,11 +104,21 @@ pub fn hall_for_slot(slot: i32) -> TownHall {
     assert!(slot >= 0);
     let edge = (slot as f64).sqrt().floor() as i32;
     let offset = slot - edge * edge;
-    let (x, y) = if offset <= edge { (offset, edge) } else { (edge, 2 * edge - offset) };
-    let origin = IVec2 { x: TOWN_OFFSET + x * TOWN_GRID, y: TOWN_OFFSET + y * TOWN_GRID };
+    let (x, y) = if offset <= edge {
+        (offset, edge)
+    } else {
+        (edge, 2 * edge - offset)
+    };
+    let origin = IVec2 {
+        x: TOWN_OFFSET + x * TOWN_GRID,
+        y: TOWN_OFFSET + y * TOWN_GRID,
+    };
     TownHall {
         id: format!("h-{}-{}", origin.x, origin.y),
-        cell: (origin.x.div_euclid(CELL_TILES), origin.y.div_euclid(CELL_TILES)),
+        cell: (
+            origin.x.div_euclid(CELL_TILES),
+            origin.y.div_euclid(CELL_TILES),
+        ),
         origin,
     }
 }
@@ -100,33 +129,49 @@ pub struct CreateTownResponse {
     pub error: Option<String>,
     pub town: Option<Town>,
     pub spawn_tile: Option<IVec2>,
-    #[serde(default)] pub connection_id: Option<ClientId>,
-    #[serde(default)] pub player_state: Option<PlayerState>,
+    #[serde(default)]
+    pub connection_id: Option<ClientId>,
+    #[serde(default)]
+    pub player_state: Option<PlayerState>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ResumeGameRequest { pub user: GameUser }
+pub struct ResumeGameRequest {
+    pub user: GameUser,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameConnection {
     pub player_id: ClientId,
     pub connection_id: ClientId,
-    #[serde(default)] pub checkpoint: Option<PlayerState>,
+    #[serde(default)]
+    pub checkpoint: Option<PlayerState>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GameEndReason { #[default] IntentionalQuit, Timeout, Orbed, SetupFailed }
+pub enum GameEndReason {
+    #[default]
+    IntentionalQuit,
+    Timeout,
+    Orbed,
+    SetupFailed,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndGameRequest {
     pub player_id: ClientId,
-    #[serde(default)] pub connection_id: Option<ClientId>,
-    #[serde(default)] pub reason: GameEndReason,
+    #[serde(default)]
+    pub connection_id: Option<ClientId>,
+    #[serde(default)]
+    pub reason: GameEndReason,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GameEnded { pub player_id: ClientId, pub reason: GameEndReason }
+pub struct GameEnded {
+    pub player_id: ClientId,
+    pub reason: GameEndReason,
+}
 
 pub const RECONNECT_GRACE_SECONDS: u64 = 15 * 60;
 pub const SUBJ_GAME_RESUME: &str = "twz.game.resume";
@@ -147,13 +192,18 @@ pub const SUBJ_TOWN_LIST: &str = "twz.town.list";
 pub const SUBJ_GAME_END: &str = "twz.game.end";
 pub const SUBJ_GAME_TOUCH: &str = "twz.game.touch";
 pub const SUBJ_CELL_SPAWN_ALL: &str = "twz.cell.*.*.spawn";
-pub fn subj_cell_spawn(cell:&CellKey) -> String {
+pub fn subj_cell_spawn(cell: &CellKey) -> String {
     format!("twz.cell.{}.{}.spawn", cell.0, cell.1)
 }
 
 pub const SPAWN_OFFSET: IVec2 = IVec2 { x: 1, y: 3 };
 #[inline]
-pub fn spawn_from_hall(h: IVec2) -> IVec2 { IVec2{ x: h.x + SPAWN_OFFSET.x, y: h.y + SPAWN_OFFSET.y } }
+pub fn spawn_from_hall(h: IVec2) -> IVec2 {
+    IVec2 {
+        x: h.x + SPAWN_OFFSET.x,
+        y: h.y + SPAWN_OFFSET.y,
+    }
+}
 
 #[inline]
 pub fn cell_of(x: f32, y: f32, w: f32) -> CellKey {
@@ -183,8 +233,8 @@ pub fn neighbor_cells(c: CellKey) -> [CellKey; 9] {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerRegister {
     pub server_id: String,
-    pub http_addr: String, 
-    pub ws_addr: String, 
+    pub http_addr: String,
+    pub ws_addr: String,
     pub capacity_hint: u32,
 }
 
@@ -220,12 +270,22 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    pub fn initial_for_town(town:&Town) -> Self {
-        let tile=spawn_from_hall(town.hall.origin);
-        Self { id:town.mayor_player_id, x:tile.x as f32*TILE_PX, y:tile.y as f32*TILE_PX,
-            vx:0.0,vy:0.0,ang:0.0,hp:100,max_hp:100,respawn_at:None,
-            game:PlayerGameState::new(GameIdentity::mayor(town.mayor_player_id,town.id.clone())),
-            damage_contributions:Vec::new(),spawn_tile:Some(tile) }
+    pub fn initial_for_town(town: &Town) -> Self {
+        let tile = spawn_from_hall(town.hall.origin);
+        Self {
+            id: town.mayor_player_id,
+            x: tile.x as f32 * TILE_PX,
+            y: tile.y as f32 * TILE_PX,
+            vx: 0.0,
+            vy: 0.0,
+            ang: 0.0,
+            hp: 100,
+            max_hp: 100,
+            respawn_at: None,
+            game: PlayerGameState::new(GameIdentity::mayor(town.mayor_player_id, town.id.clone())),
+            damage_contributions: Vec::new(),
+            spawn_tile: Some(tile),
+        }
     }
 }
 
@@ -252,7 +312,14 @@ mod town_tests {
             assert_eq!((hall.origin.x - TOWN_OFFSET).rem_euclid(TOWN_GRID), 0);
             assert_eq!((hall.origin.y - TOWN_OFFSET).rem_euclid(TOWN_GRID), 0);
             let spawn = spawn_from_hall(hall.origin);
-            assert_eq!(cell_of(spawn.x as f32 * TILE_PX, spawn.y as f32 * TILE_PX, CELL_TILES as f32 * TILE_PX), hall.cell);
+            assert_eq!(
+                cell_of(
+                    spawn.x as f32 * TILE_PX,
+                    spawn.y as f32 * TILE_PX,
+                    CELL_TILES as f32 * TILE_PX
+                ),
+                hall.cell
+            );
         }
     }
 }

@@ -15,7 +15,10 @@ pub struct TownRegistry {
 
 impl TownRegistry {
     pub async fn new(nats: async_nats::Client, database_url: &str) -> Result<Self> {
-        Ok(Self { nats, games: GameRepository::connect(database_url).await? })
+        Ok(Self {
+            nats,
+            games: GameRepository::connect(database_url).await?,
+        })
     }
 
     pub async fn serve(self) -> Result<()> {
@@ -109,21 +112,30 @@ impl TownRegistry {
     async fn create(&self, request: CreateTownRequest) -> Result<CreateTownResponse> {
         let name = validate_town_name(&request.desired_name).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(!request.user.sub.is_empty(), "Missing authenticated user.");
-        let admission = self.games.create_game(&request.user, request.player_id, &name).await?;
+        let admission = self
+            .games
+            .create_game(&request.user, request.player_id, &name)
+            .await?;
         Ok(Self::admission_response(Some(admission)))
     }
 
     fn admission_response(admission: Option<GameAdmission>) -> CreateTownResponse {
         match admission {
             Some(admission) => CreateTownResponse {
-                ok: true, error: None,
+                ok: true,
+                error: None,
                 spawn_tile: Some(spawn_from_hall(admission.town.hall.origin)),
-                town: Some(admission.town), connection_id: Some(admission.connection_id),
+                town: Some(admission.town),
+                connection_id: Some(admission.connection_id),
                 player_state: Some(admission.player_state),
             },
             None => CreateTownResponse {
-                ok: true, error: None, town: None, spawn_tile: None,
-                connection_id: None, player_state: None,
+                ok: true,
+                error: None,
+                town: None,
+                spawn_tile: None,
+                connection_id: None,
+                player_state: None,
             },
         }
     }
@@ -132,8 +144,12 @@ impl TownRegistry {
         let response = result.unwrap_or_else(|error| {
             tracing::warn!("game entry failed: {error:#}");
             CreateTownResponse {
-                ok: false, error: Some(error.to_string()), town: None, spawn_tile: None,
-                connection_id: None, player_state: None,
+                ok: false,
+                error: Some(error.to_string()),
+                town: None,
+                spawn_tile: None,
+                connection_id: None,
+                player_state: None,
             }
         });
         serde_json::to_vec(&response).unwrap()
@@ -144,14 +160,18 @@ impl TownRegistry {
             Ok(()) => br#"{"ok":true}"#.to_vec(),
             Err(error) => {
                 tracing::warn!("game operation failed: {error:#}");
-                serde_json::json!({"ok":false,"error":error.to_string()}).to_string().into_bytes()
+                serde_json::json!({"ok":false,"error":error.to_string()})
+                    .to_string()
+                    .into_bytes()
             }
         }
     }
 
     async fn connection_update(&self, request: GameConnection, disconnected: bool) -> Result<()> {
-        anyhow::ensure!(self.games.update_connection(&request, disconnected).await?,
-            "This game connection is no longer active.");
+        anyhow::ensure!(
+            self.games.update_connection(&request, disconnected).await?,
+            "This game connection is no longer active."
+        );
         Ok(())
     }
 
@@ -165,15 +185,32 @@ impl TownRegistry {
     async fn publish_ended(&self, town: Town, reason: GameEndReason) -> Result<()> {
         // No successor roles are playable yet. Future promotion handling must
         // replace this no-successor outcome when eligible members exist.
-        if matches!(reason, GameEndReason::IntentionalQuit | GameEndReason::Timeout) {
-            self.nats.publish(SUBJ_PROMOTION_REQUESTED, serde_json::json!({
-                "town":town, "former_mayor_id":town.mayor_player_id, "reason":reason,
-                "eligible_successors":[], "outcome":"no_successors",
-            }).to_string().into()).await?;
+        if matches!(
+            reason,
+            GameEndReason::IntentionalQuit | GameEndReason::Timeout
+        ) {
+            self.nats
+                .publish(
+                    SUBJ_PROMOTION_REQUESTED,
+                    serde_json::json!({
+                        "town":town, "former_mayor_id":town.mayor_player_id, "reason":reason,
+                        "eligible_successors":[], "outcome":"no_successors",
+                    })
+                    .to_string()
+                    .into(),
+                )
+                .await?;
         }
-        self.nats.publish(SUBJ_GAME_ENDED, serde_json::to_vec(&GameEnded {
-            player_id: town.mayor_player_id, reason,
-        })?.into()).await?;
+        self.nats
+            .publish(
+                SUBJ_GAME_ENDED,
+                serde_json::to_vec(&GameEnded {
+                    player_id: town.mayor_player_id,
+                    reason,
+                })?
+                .into(),
+            )
+            .await?;
         Ok(())
     }
 
