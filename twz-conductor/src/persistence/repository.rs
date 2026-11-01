@@ -5,12 +5,12 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{
     entity::prelude::DateTimeWithTimeZone, sea_query::OnConflict, ActiveModelTrait, ColumnTrait,
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DatabaseTransaction, DbBackend,
-    EntityTrait, QueryFilter, QueryOrder, QueryResult, QuerySelect, Set, Statement,
-    TransactionTrait, Value,
+    EntityTrait, FromQueryResult, QueryFilter, QueryOrder, QueryResult, QuerySelect, Set,
+    Statement, TransactionTrait, Value,
 };
 use twz_shared::{
-    hall_for_slot, ClientId, EndGameRequest, GameConnection, GameUser, PlayerState, Town,
-    RECONNECT_GRACE_SECONDS,
+    hall_for_slot, ClientId, EndGameRequest, ExistingGameSummary, GameConnection, GameUser,
+    PlayerState, Town, RECONNECT_GRACE_SECONDS,
 };
 
 use super::entities::{games, users};
@@ -18,6 +18,15 @@ use super::entities::{games, users};
 const ALLOCATION_LOCK: i64 = 7_489_221;
 const MIGRATION_LOCK: i64 = 7_489_220;
 const STALE_CONNECTION_SECONDS: i64 = 45;
+
+#[derive(FromQueryResult)]
+struct GameSummaryRow {
+    player_id: String,
+    town_id: String,
+    town_name: String,
+    connection_id: Option<String>,
+    disconnected_at: Option<DateTimeWithTimeZone>,
+}
 
 #[derive(Debug)]
 pub(crate) struct GameAdmission {
@@ -214,6 +223,37 @@ impl GameRepository {
             .into_iter()
             .map(|town| Ok(serde_json::from_value(town)?))
             .collect()
+    }
+
+    /// Read-only entry lookup: no connection claim, checkpoint load or simulation attachment.
+    pub async fn active_game_summary(&self, subject: &str) -> Result<Option<ExistingGameSummary>> {
+        let row = games::Entity::find()
+            .select_only()
+            .columns([
+                games::Column::PlayerId,
+                games::Column::TownId,
+                games::Column::TownName,
+                games::Column::ConnectionId,
+                games::Column::DisconnectedAt,
+            ])
+            .filter(games::Column::Auth0Sub.eq(subject))
+            .filter(games::Column::EndedAt.is_null())
+            .order_by_desc(games::Column::StartedAt)
+            .into_model::<GameSummaryRow>()
+            .one(&self.db)
+            .await?;
+        row.map(|row| {
+            Ok(ExistingGameSummary {
+                player_id: row.player_id.parse()?,
+                town_id: row.town_id,
+                town_name: row.town_name,
+                is_connected: row.connection_id.is_some(),
+                reconnect_until_ms: row
+                    .disconnected_at
+                    .map(|at| at.timestamp_millis() + RECONNECT_GRACE_SECONDS as i64 * 1000),
+            })
+        })
+        .transpose()
     }
 
     pub async fn active_player_ids(&self, subject: &str) -> Result<Vec<ClientId>> {

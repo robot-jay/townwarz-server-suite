@@ -224,7 +224,7 @@ async fn authenticated_entry_live_cells_geometry_resume_and_terminal_end() -> Re
     };
     let app = Router::new()
         .route("/play", get(play_handler))
-        .with_state(state);
+        .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("ws://{}/play", listener.local_addr()?);
     let gateway_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -289,13 +289,56 @@ async fn authenticated_entry_live_cells_geometry_resume_and_terminal_end() -> Re
         new_hall["id"], hall["id"],
         "physical hall is reused, not duplicated"
     );
-    fresh
-        .send(TMsg::Text("{\"type\":\"quit_game\"}".into()))
+    // Inspecting an active game must not try to claim its connection or open a
+    // second backend session. The menu can then abandon it without resuming.
+    let before = state.switches.read().await.len();
+    let (mut menu, _) = connect_async(&url).await?;
+    menu.send(TMsg::Text(
+        serde_json::json!({"type":"check_game","id_token":tokens["valid"]}).to_string(),
+    ))
+    .await?;
+    let summary = value_for(&mut menu, "existing_game").await?;
+    assert_eq!(summary["game"]["player_id"], fresh_state["me"]);
+    assert_eq!(summary["game"]["town_name"], "Integration Fresh");
+    assert_eq!(summary["game"]["is_connected"], true);
+    assert!(state.switches.read().await.len() <= before);
+    let mut conflict = enter(&url, &tokens["valid"], Some("Cannot Allocate Twice")).await?;
+    let conflict = value_for(&mut conflict, "existing_game").await?;
+    assert_eq!(
+        conflict["game"]["player_id"], fresh_state["me"],
+        "a rejected create must offer the existing town instead of a dead-end error"
+    );
+
+    // If a menu still refers to the previously ended town, it cannot abandon a
+    // newer game that the same account started in another tab.
+    let (mut stale_menu, _) = connect_async(&url).await?;
+    stale_menu
+        .send(TMsg::Text(
+            serde_json::json!({"type":"abandon_game","id_token":tokens["valid"],"player_id":pid})
+                .to_string(),
+        ))
         .await?;
-    value_for(&mut fresh, "game_quit_ack").await?;
+    value_for(&mut stale_menu, "game_quit_ack").await?;
+    let (mut after_stale, _) = connect_async(&url).await?;
+    after_stale
+        .send(TMsg::Text(
+            serde_json::json!({"type":"check_game","id_token":tokens["valid"]}).to_string(),
+        ))
+        .await?;
+    assert_eq!(
+        value_for(&mut after_stale, "existing_game").await?["game"]["player_id"],
+        fresh_state["me"],
+        "abandoning an old displayed ID must leave the newer game reserved"
+    );
+
+    let (mut abandon, _) = connect_async(&url).await?;
+    abandon.send(TMsg::Text(serde_json::json!({"type":"abandon_game","id_token":tokens["valid"],"player_id":fresh_state["me"]}).to_string())).await?;
+    value_for(&mut abandon, "game_quit_ack").await?;
+    value_for(&mut fresh, "game_ended").await?;
     let promotion = timeout(TEST_TIMEOUT, promotions.next()).await?.unwrap();
     let promotion: serde_json::Value = serde_json::from_slice(&promotion.payload)?;
     assert_eq!(promotion["outcome"], "no_successors");
+    assert_eq!(promotion["former_mayor_id"], fresh_state["me"]);
     let mut unavailable = enter(&url, &tokens["valid"], None).await?;
     value_for(&mut unavailable, "no_game").await?;
     gateway_task.abort();

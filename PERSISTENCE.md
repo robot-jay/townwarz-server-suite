@@ -22,6 +22,8 @@ NATS commands
 
 SeaORM handles profile upsert, new game insertion, active-account checks, active town/subject queries, and updating an already row-locked resume claim. Directory queries project only town JSON; polling does not retrieve everyone's private checkpoints. Timestamps continue to use PostgreSQL's current timestamp/defaults.
 
+Game-entry metadata uses `active_game_summary`, a read-only five-column ORM projection with no checkpoint retrieval or session-token update. The authenticated check endpoint runs normal expiry housekeeping before this lookup. Targeted abandonment filters the subject's active IDs against the displayed game ID before invoking the existing terminal/promotion operation.
+
 The repository owns a SQLx connection pool (minimum 1, maximum 10, eight-second connect/acquire timeouts). Cloned repositories share that pool; independent instances can use separate pools against the same database. Statement logging is disabled by default. Driver TLS behavior follows the PostgreSQL connection URL and SQLx defaults.
 
 ## Why some SQL remains

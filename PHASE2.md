@@ -42,7 +42,9 @@ Ordinary building instances are active simulation state. Disconnect grace retain
 Initial `/play` messages all carry an Auth0 ID token:
 
 - `start_game`: Mayor and town name, creates a fresh game only if the account has no reserved game.
+- `check_game`: read-only metadata lookup. Returns `existing_game` with town name, game ID and connection/grace status, or `no_game`; it does not claim a token or connect to a cell.
 - `resume_game`: looks up the authenticated subject; returns `no_game` or attaches to its reserved game.
+- `abandon_game`: explicit menu action targeting the displayed player/game ID. Uses the same intentional departure/promotion path, scoped to that authenticated subject and game. It does not open a simulation connection, and an old menu cannot abandon a newer game.
 - `quit_game`: authenticated menu/logout path, ends that subject's game even when its gameplay socket was lost.
 
 During play, `quit_game` requires no token payload because the connection is already authenticated. The gateway waits for the conductor to confirm the intentional end and sends `game_quit_ack`. The client waits for that acknowledgement before leaving. Logout attempts the same explicit departure before Auth0 logout; if the server is unreachable, no network protocol can deliver intent, so the disconnect grace/expiry is the fallback.
@@ -53,7 +55,7 @@ Backend `set_pid` now optionally carries `resume_state`. It is sent only on init
 
 ## Client behavior
 
-After Auth0 login or page refresh, the React client probes for a resumable game before showing new-game setup. An unexpected drop shows Reconnect and explicit Leave town options. A successful reconnect preserves the same player/game/town. A terminal `game_ended` notification disables reconnect and offers new-game setup. Unclaimed halls stay physical; a distinct unoccupied art treatment is deliberately deferred.
+After Auth0 login or page refresh, the React client checks for an existing game without entering it. Its entry screen offers explicit Resume or Abandon actions, showing town name and whether it is connected elsewhere. A create conflict also returns that choice. Abandonment waits for acknowledgement, retaining the town and showing retryable errors if it fails. An unexpected drop shows Reconnect and explicit abandonment options. A successful reconnect preserves the same player/game/town. A terminal `game_ended` notification disables reconnect and offers new-game setup. Unclaimed halls stay physical; a distinct unoccupied art treatment is deliberately deferred.
 
 ## Deployment and checks
 

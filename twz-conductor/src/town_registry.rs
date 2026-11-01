@@ -24,6 +24,7 @@ impl TownRegistry {
     pub async fn serve(self) -> Result<()> {
         let mut creates = self.nats.subscribe(SUBJ_TOWN_CREATE).await?;
         let mut resumes = self.nats.subscribe(SUBJ_GAME_RESUME).await?;
+        let mut checks = self.nats.subscribe(SUBJ_GAME_CHECK).await?;
         let mut quits = self.nats.subscribe(SUBJ_GAME_QUIT_USER).await?;
         let mut lists = self.nats.subscribe(SUBJ_TOWN_LIST).await?;
         let mut ends = self.nats.subscribe(SUBJ_GAME_END).await?;
@@ -51,6 +52,18 @@ impl TownRegistry {
                         }.await;
                         (message, Self::entry_response(result))
                     }
+                    Some(message) = checks.next() => {
+                        let result = async {
+                            this.expire_leases().await?;
+                            let request: ResumeGameRequest = serde_json::from_slice(&message.payload)?;
+                            this.games.active_game_summary(&request.user.sub).await
+                        }.await;
+                        let response = match result {
+                            Ok(game) => GameLookupResponse { ok: true, error: None, game },
+                            Err(error) => GameLookupResponse { ok: false, error: Some(error.to_string()), game: None },
+                        };
+                        (message, serde_json::to_vec(&response).unwrap())
+                    }
                     Some(message) = lists.next() => {
                         let response = match this.games.active_towns().await {
                             Ok(towns) => serde_json::to_vec(&towns).unwrap(),
@@ -70,8 +83,9 @@ impl TownRegistry {
                     }
                     Some(message) = quits.next() => {
                         let result = async {
-                            let request: ResumeGameRequest = serde_json::from_slice(&message.payload)?;
+                            let request: QuitUserGameRequest = serde_json::from_slice(&message.payload)?;
                             for player_id in this.games.active_player_ids(&request.user.sub).await? {
+                                if request.player_id.is_some_and(|expected| expected != player_id) { continue; }
                                 this.end_game(EndGameRequest {
                                     player_id, connection_id: None, reason: GameEndReason::IntentionalQuit,
                                 }).await?;

@@ -47,6 +47,9 @@ pub struct GameUser {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameEntry {
+    CheckGame {
+        id_token: String,
+    },
     StartGame {
         id_token: String,
         role: String,
@@ -57,6 +60,10 @@ pub enum GameEntry {
     },
     QuitGame {
         id_token: String,
+    },
+    AbandonGame {
+        id_token: String,
+        player_id: ClientId,
     },
 }
 
@@ -140,6 +147,30 @@ pub struct ResumeGameRequest {
     pub user: GameUser,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QuitUserGameRequest {
+    pub user: GameUser,
+    /// Omitted for logout; set when abandoning a particular displayed town.
+    #[serde(default)]
+    pub player_id: Option<ClientId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExistingGameSummary {
+    pub player_id: ClientId,
+    pub town_id: String,
+    pub town_name: String,
+    pub is_connected: bool,
+    pub reconnect_until_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GameLookupResponse {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub game: Option<ExistingGameSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameConnection {
     pub player_id: ClientId,
@@ -175,6 +206,7 @@ pub struct GameEnded {
 
 pub const RECONNECT_GRACE_SECONDS: u64 = 15 * 60;
 pub const SUBJ_GAME_RESUME: &str = "twz.game.resume";
+pub const SUBJ_GAME_CHECK: &str = "twz.game.check";
 pub const SUBJ_GAME_DISCONNECT: &str = "twz.game.disconnect";
 pub const SUBJ_GAME_QUIT_USER: &str = "twz.game.quit_user";
 pub const SUBJ_GAME_ENDED: &str = "twz.game.ended";

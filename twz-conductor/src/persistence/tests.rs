@@ -43,6 +43,15 @@ async fn postgres_grace_resume_fencing_quit_orb_and_expiry() -> Result<()> {
         .create_game(&user, ClientId::new_v4(), "Copper Creek")
         .await?;
     let town = initial.town;
+    let summary = repository.active_game_summary(&user.sub).await?.unwrap();
+    assert_eq!(summary.player_id, town.mayor_player_id);
+    assert_eq!(summary.town_name, "Copper Creek");
+    assert!(summary.is_connected);
+    assert!(summary.reconnect_until_ms.is_none());
+    assert!(repository
+        .active_game_summary("unrelated|account")
+        .await?
+        .is_none());
     assert!(
         repository.resume_game(&user.sub).await.is_err(),
         "cannot attach two connections"
@@ -66,6 +75,18 @@ async fn postgres_grace_resume_fencing_quit_orb_and_expiry() -> Result<()> {
         checkpoint: Some(checkpoint.clone()),
     };
     assert!(repository.update_connection(&old, true).await?);
+    let summary = repository.active_game_summary(&user.sub).await?.unwrap();
+    assert!(!summary.is_connected);
+    assert!(summary.reconnect_until_ms.is_some());
+    assert_eq!(
+        games::Entity::find_by_id(town.mayor_player_id.to_string())
+            .one(&repository.db)
+            .await?
+            .unwrap()
+            .connection_id,
+        None,
+        "checking an existing game must not claim a connection"
+    );
     assert!(repository
         .active_towns()
         .await?
