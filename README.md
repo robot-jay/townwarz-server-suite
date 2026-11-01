@@ -1,5 +1,7 @@
 # This is the server softwares for the Townwarz game.
 
+Persistence is implemented with SeaORM behind a repository boundary. See [PERSISTENCE.md](PERSISTENCE.md) for entities, transaction/locking guarantees, configuration and database tests.
+
 See [PHASE2.md](PHASE2.md) for physical neutral/owned townhalls, exact 3x3/96px-body/48px-forecourt geometry, building occupancy/collision, and the **15-minute same-game reconnect lifecycle**. Intentional quitting uses a no-successor release until promotion candidates are implemented.
 
 See [PHASE1.md](PHASE1.md) for the versioned Buildings/Items/ItemBuildings domain model, player-owned wallets and six-slot inventory, town allegiance, reward/assist extension points, and handoff-state guarantees. The read-only catalog is available at gateway `GET /catalog`.
@@ -23,7 +25,7 @@ AUTH0_CLIENT_ID=your-client-id
 ```
 
 - Create the `townwarz` PostgreSQL database first. The local `affectionate_shtern` container's `townwarz` database was created during implementation; other databases were left alone.
-- The conductor requires `DATABASE_URL` and applies `twz-conductor/migrations/001_games.sql` automatically. This initial local implementation uses an unencrypted PostgreSQL connection (`NoTls`).
+- The conductor requires `DATABASE_URL`. Its SeaORM repository maps the existing tables and automatically applies the idempotent SQL files in `twz-conductor/migrations/`. PostgreSQL TLS settings follow the connection URL/SQLx defaults.
 - The gateway requires the two Auth0 values for `/play`. They must match the web client's `VITE_AUTH0_DOMAIN` and `VITE_AUTH0_CLIENT_ID`. Use the Auth0 hostname without `https://`. No client secret or additional Auth0 API audience is required. The SPA must use RS256 signing.
 - Run `cargo run` commands from the workspace root so dotenv finds `.env`. Environment variables take precedence over dotenv.
 - `twz_users` stores verified Auth0 identity/profile data; `twz_games` stores game role, town details, and start/end times. Town names are trimmed and validated server-side (2–32 Unicode characters; letters, numbers, spaces, apostrophes, hyphens). Names need not be unique.
@@ -43,15 +45,14 @@ cargo check --workspace
 cargo test --workspace
 ```
 
-The PostgreSQL integration test is opt-in and uses a unique fixture user, cleaning up its own records afterwards. Point it at a development/test database and NATS instance:
+The PostgreSQL repository integration tests are opt-in and use unique fixture users, cleaning up their own records afterwards. Point them at an isolated development/test database; repository tests do not require NATS:
 
 ```powershell
 $env:TEST_DATABASE_URL = $env:DATABASE_URL
-$env:TEST_NATS_URL = 'nats://127.0.0.1:4222'
-cargo test --workspace postgres_grace -- --ignored --nocapture
+cargo test --workspace postgres_ -- --ignored --nocapture
 ```
 
-The Auth0 JWT validation tests run in the normal workspace suite without network access. Phase 2's PostgreSQL grace/resume test uses `cargo test --workspace postgres_grace -- --ignored --nocapture` with TEST_DATABASE_URL/TEST_NATS_URL.
+The Auth0 JWT validation tests run in the normal workspace suite without network access. PostgreSQL tests cover grace/resume and concurrent claims across independent connection pools using TEST_DATABASE_URL.
 
 For the live-cell integration test, also set `TEST_CONDUCTOR_URL` to an isolated running conductor with registered cells backed by the test database. Run `cargo test --workspace authenticated_entry_live_cells_geometry -- --ignored --nocapture`. It verifies actual hall geometry, resumed movement/state, Orb invalidation, stable hall reuse and acknowledged quit. To run just the stub-service test on a separate isolated NATS instance, use the filter `authenticated_entry_verifies`.
 

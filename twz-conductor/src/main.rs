@@ -23,6 +23,7 @@ use url::Url;
 use twz_shared::{Heartbeat, RouteCellResponse, ServerRegister};
 
 mod town_registry;
+mod persistence;
 use crate::town_registry::TownRegistry;
 
 mod supervisor;

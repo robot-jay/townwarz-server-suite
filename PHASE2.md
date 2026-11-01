@@ -64,13 +64,13 @@ cargo check --workspace
 cargo test --workspace
 ```
 
-With isolated NATS and a development PostgreSQL database:
+With an isolated development PostgreSQL database:
 
 ```powershell
 cargo test --workspace postgres_grace -- --ignored --nocapture
 ```
 
-Set TEST_DATABASE_URL and TEST_NATS_URL first. This verifies checkpoint persistence, connection fencing, hold/reuse, intentional quit, Orb termination, and the 15-minute expiry using an aged fixture timestamp rather than a real wait.
+Set TEST_DATABASE_URL first. This repository test no longer requires NATS. It verifies checkpoint persistence, connection fencing, hold/reuse, intentional quit, Orb termination, and the 15-minute expiry using an aged fixture timestamp rather than a real wait. Use the `postgres_` filter to also run the independent-pool concurrency checks; see [PERSISTENCE.md](PERSISTENCE.md).
 
 With an isolated running conductor/cells and TEST_CONDUCTOR_URL/TEST_NATS_URL:
 
