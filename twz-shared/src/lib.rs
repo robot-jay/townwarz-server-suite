@@ -45,6 +45,8 @@ pub struct GameUser {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameEntry {
     StartGame { id_token: String, role: String, town_name: String },
+    ResumeGame { id_token: String },
+    QuitGame { id_token: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,6 +59,7 @@ pub enum BackendHello {
         id: ClientId,
         #[serde(default)] town: Option<Town>,
         #[serde(default)] identity: Option<GameIdentity>,
+        #[serde(default)] resume_state: Option<PlayerState>,
     },
 }
 
@@ -97,7 +100,40 @@ pub struct CreateTownResponse {
     pub error: Option<String>,
     pub town: Option<Town>,
     pub spawn_tile: Option<IVec2>,
+    #[serde(default)] pub connection_id: Option<ClientId>,
+    #[serde(default)] pub player_state: Option<PlayerState>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResumeGameRequest { pub user: GameUser }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameConnection {
+    pub player_id: ClientId,
+    pub connection_id: ClientId,
+    #[serde(default)] pub checkpoint: Option<PlayerState>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameEndReason { #[default] IntentionalQuit, Timeout, Orbed, SetupFailed }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndGameRequest {
+    pub player_id: ClientId,
+    #[serde(default)] pub connection_id: Option<ClientId>,
+    #[serde(default)] pub reason: GameEndReason,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameEnded { pub player_id: ClientId, pub reason: GameEndReason }
+
+pub const RECONNECT_GRACE_SECONDS: u64 = 15 * 60;
+pub const SUBJ_GAME_RESUME: &str = "twz.game.resume";
+pub const SUBJ_GAME_DISCONNECT: &str = "twz.game.disconnect";
+pub const SUBJ_GAME_QUIT_USER: &str = "twz.game.quit_user";
+pub const SUBJ_GAME_ENDED: &str = "twz.game.ended";
+pub const SUBJ_PROMOTION_REQUESTED: &str = "twz.town.promotion.requested";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnPlayerAt {
@@ -181,6 +217,16 @@ pub struct PlayerState {
     pub damage_contributions: Vec<DamageContribution>,
     #[serde(default)]
     pub spawn_tile: Option<IVec2>,
+}
+
+impl PlayerState {
+    pub fn initial_for_town(town:&Town) -> Self {
+        let tile=spawn_from_hall(town.hall.origin);
+        Self { id:town.mayor_player_id, x:tile.x as f32*TILE_PX, y:tile.y as f32*TILE_PX,
+            vx:0.0,vy:0.0,ang:0.0,hp:100,max_hp:100,respawn_at:None,
+            game:PlayerGameState::new(GameIdentity::mayor(town.mayor_player_id,town.id.clone())),
+            damage_contributions:Vec::new(),spawn_tile:Some(tile) }
+    }
 }
 
 #[cfg(test)]

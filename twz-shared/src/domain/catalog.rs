@@ -85,8 +85,8 @@ const fn building(
         destructible: !matches!(building_type, BuildingType::TownHall),
         geometry: GeometryDefinition {
             footprint_tiles: IVec2 { x: 3, y: 3 },
-            collision_px: PixelRect { x: 0, y: 0, width: 144, height: if short { 90 } else { 144 } },
-            visual_bounds_px: None,
+            collision_px: PixelRect { x: 0, y: 0, width: 144, height: if short { 96 } else { 144 } },
+            visual_bounds_px: Some(PixelRect { x: 0, y: 0, width: 144, height: 144 }),
         },
         max_distance_from_hall_px: 1500,
         production,

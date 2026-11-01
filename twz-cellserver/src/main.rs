@@ -5,6 +5,7 @@ use twz_shared::{
     Heartbeat, HandoffRequest, HandoffAck, RouteCellResponse, PlayerState, cell_of,
     GameIdentity, PlayerGameState, PlayerAffiliation, Combatant, DamageAttribution,
     DamageSourceKind, DamageContribution, DefeatRecord, RewardTargetKind, DOMAIN_VERSION,
+    BuildingInstance, WorldRect, GameEnded, SUBJ_GAME_ENDED,
 };
 
 use std::{
@@ -28,6 +29,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::{mpsc, RwLock}};
 use uuid::Uuid;
+
+mod buildings;
+use buildings::BuildingStore;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -105,6 +109,8 @@ struct Bullet {
     owner: ClientId,
     born_ms: u64,
     credit: DamageAttribution,
+    #[serde(skip)] previous_x: f32,
+    #[serde(skip)] previous_y: f32,
 }
 
 impl Player {
@@ -181,6 +187,9 @@ struct World {
     #[serde(skip)]
     grid_bullets: HashMap<CellKey, HashSet<BulletId>>,
     terrain_chunks: HashMap<(i32,i32), Vec<u8>>, //each chunk is CHUNK_TILES*CHUNK_TILES bytes
+    #[serde(skip)] buildings: BuildingStore,
+    #[serde(skip)] ended_games: HashSet<ClientId>,
+    #[serde(skip)] last_town_change: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -204,6 +213,7 @@ enum ClientMsg {
         ts: u64,
     },
     Ping,
+    PauseGame,
 }
 
 #[derive(Debug, Clone)]
@@ -216,13 +226,18 @@ struct InputMsg {
     ts: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum ControlMsg {
-    Spawn { id: ClientId, town: Option<Town>, identity: GameIdentity },
+    Spawn { id: ClientId, town: Option<Town>, identity: GameIdentity, resume_state: Option<PlayerState> },
     Despawn(ClientId),
     ControlSpawnAt { player_id: ClientId, tile: IVec2 },
     AdoptHandoff(HandoffRequest),
     AcknowledgeHandoff(HandoffAck),
+    SyncTowns { towns: Vec<Town>, requested_at: Instant },
+    EndGame(GameEnded),
+    PauseGame(ClientId),
+    InsertBuilding { building:BuildingInstance, reply:tokio::sync::oneshot::Sender<Result<(),String>> },
+    RemoveBuilding { id:Uuid, game_id:Uuid, reply:tokio::sync::oneshot::Sender<Result<(),String>> },
 }
 
 #[derive(Serialize)]
@@ -249,10 +264,10 @@ const MAX_PENETRATION_ITER: usize = 3;
 
 impl Tile {
     #[inline] fn blocks_player(self) -> bool {
-        matches!(self, Tile::Water | Tile::Rock | Tile::Town)
+        matches!(self, Tile::Water | Tile::Rock)
     }
     #[inline] fn blocks_bullet(self) -> bool {
-        matches!(self, Tile::Rock | Tile::Town)
+        matches!(self, Tile::Rock)
     }
 }
 
@@ -337,7 +352,6 @@ enum Tile {
     Ground = 0,
     Water  = 1,
     Rock   = 2,
-    Town   = 3,
 }
 impl Tile {
     #[inline] fn is_solid(self) -> bool {
@@ -422,12 +436,6 @@ fn fbm(mut x: f32, mut y: f32, seed: u64) -> f32 {
 }
 
 #[inline]
-fn is_town_tile(tx: i32, ty: i32) -> bool {
-    (tx - TOWN_OFFSET).rem_euclid(TOWN_GRID) == 0 &&
-    (ty - TOWN_OFFSET).rem_euclid(TOWN_GRID) == 0
-}
-
-#[inline]
 fn near_town_clear(tx: i32, ty: i32) -> bool {
     let rx = (tx - TOWN_OFFSET).rem_euclid(TOWN_GRID);
     let ry = (ty - TOWN_OFFSET).rem_euclid(TOWN_GRID);
@@ -437,9 +445,6 @@ fn near_town_clear(tx: i32, ty: i32) -> bool {
 }
 
 fn terrain_at_tile(tx: i32, ty: i32) -> Tile {
-    if is_town_tile(tx, ty) {
-        return Tile::Town;
-    }
     if near_town_clear(tx, ty) {
         return Tile::Ground;
     }
@@ -465,7 +470,7 @@ fn collect_tile_window(world: &mut World, ox: i32, oy: i32, w: i32, h: i32) -> T
     let mut data = Vec::with_capacity((w * h) as usize);
     for ty in oy..(oy + h) {
         for tx in ox..(ox + w) {
-            data.push(terrain_at_tile(tx, ty) as u8);
+            data.push(tile_at(world, tx, ty) as u8);
         }
     }
     TileWindow { ox, oy, w, h, data }
@@ -486,6 +491,7 @@ fn generate_chunk(cx: i32, cy: i32) -> Vec<u8> {
 }
 
 fn get_chunk<'a>(world: &'a mut World, cx: i32, cy: i32) -> &'a Vec<u8> {
+    world.buildings.ensure_chunk(cx,cy);
     world.terrain_chunks.entry((cx, cy)).or_insert_with(|| generate_chunk(cx, cy))
 }
 
@@ -498,7 +504,6 @@ fn tile_at(world: &mut World, tx: i32, ty: i32) -> Tile {
         0 => Tile::Ground,
         1 => Tile::Water,
         2 => Tile::Rock,
-        3 => Tile::Town,
         _ => Tile::Ground,
     }
 }
@@ -547,6 +552,7 @@ async fn main() -> anyhow::Result<()> {
     // Refresh after reconnect/startup as well as creation and lease expiry.
     tokio::spawn(town_refresh_task(state.clone()));
     tokio::spawn(spawn_command_task(state.clone()));
+    tokio::spawn(game_end_task(state.clone()));
 
     {
         let mut w = state.world.write().await;
@@ -610,20 +616,24 @@ fn spawn_point_for(_id: ClientId) -> (f32, f32) {
 }
 
 impl World {
-    fn attach_player(&mut self, id: ClientId, town: Option<Town>, identity: GameIdentity) {
+    fn attach_player(&mut self, id: ClientId, town: Option<Town>, identity: GameIdentity) -> bool {
         // A backend reconnect after handoff attaches to the transferred state;
         // it must never reinitialize the wallet, inventory or cooldowns.
         let spawn_tile = town.as_ref().map(|town| twz_shared::spawn_from_hall(town.hall.origin));
         if let Some(town) = town {
+            if !self.buildings.claim(&town) {return false;}
+            self.last_town_change = Some(Instant::now());
             self.towns.retain(|existing| existing.id != town.id);
             self.towns.push(town);
         }
         self.players.entry(id).or_insert_with(|| Player::new(id, identity, spawn_tile));
         self.last_input.entry(id).or_default();
         self.last_shoot.entry(id).or_insert(false);
+        true
     }
 
     fn adopt_handoff(&mut self, player: PlayerState) -> bool {
+        if self.ended_games.contains(&player.game.identity.game_id) {return false;}
         let id = player.id;
         if let Some(existing) = self.players.get(&id) {
             // Retransmission may acknowledge an already adopted player, but
@@ -657,6 +667,51 @@ impl World {
             false
         }
     }
+
+    fn sync_towns(&mut self, towns:Vec<Town>, requested_at:Instant) {
+        if self.last_town_change.is_some_and(|changed| requested_at < changed) { return; }
+        let towns:Vec<_> = towns.into_iter().filter(|town| !self.ended_games.contains(&town.mayor_player_id)).collect();
+        let active:HashSet<_> = towns.iter().map(|town|town.mayor_player_id).collect();
+        let expired:Vec<_> = self.towns.iter().filter(|town|!active.contains(&town.mayor_player_id)).map(|town|town.mayor_player_id).collect();
+        for id in expired { self.end_game(id); }
+        self.buildings.reconcile(&towns);
+        self.towns = towns;
+    }
+
+    fn end_game(&mut self, id:ClientId) {
+        self.ended_games.insert(id);
+        self.last_town_change = Some(Instant::now());
+        self.buildings.remove_game(id);
+        self.towns.retain(|town|town.mayor_player_id != id);
+        self.bullets.retain(|_,bullet| !bullet.credit.beneficiary.as_ref().is_some_and(|owner|owner.game_id==id));
+        let players:Vec<_> = self.players.iter().filter(|(_,player)|player.game.identity.game_id==id).map(|(id,_)|*id).collect();
+        for player in players { self.remove_player(player); }
+    }
+
+    fn insert_building(&mut self, mut building:BuildingInstance) -> Result<(), &'static str> {
+        let owner=building.ownership.as_ref().ok_or("constructed buildings require ownership")?;
+        if self.ended_games.contains(&owner.game_id) || !self.towns.iter().any(|town|town.mayor_player_id==owner.game_id && Some(town.id.as_str())==owner.town_id.as_deref()) {
+            return Err("building owner has no active town");
+        }
+        let definition=building.building_type.definition();
+        if definition.status != twz_shared::DefinitionStatus::Specified {return Err("building definition is unavailable");}
+        if building.building_type==twz_shared::BuildingType::TownHall {return Err("townhalls are managed by the town lifecycle");}
+        building.health=twz_shared::Health {current:definition.max_health,maximum:definition.max_health};
+        let geometry=building.building_type.definition().geometry;
+        for y in 0..geometry.footprint_tiles.y { for x in 0..geometry.footprint_tiles.x {
+            let tile=(building.origin_tile.x+x,building.origin_tile.y+y);
+            self.buildings.ensure_chunk(tile.0.div_euclid(CELL_TILES),tile.1.div_euclid(CELL_TILES));
+        }}
+        self.buildings.insert(building,|x,y| matches!(terrain_at_tile(x,y),Tile::Ground))
+    }
+
+    fn remove_building(&mut self,id:Uuid,game_id:Uuid)->Result<(),&'static str> {
+        let building=self.buildings.buildings.get(&id).ok_or("building not found")?;
+        if building.building_type==twz_shared::BuildingType::TownHall {return Err("townhalls are managed by the town lifecycle");}
+        if !building.ownership.as_ref().is_some_and(|owner|owner.game_id==game_id) {return Err("building belongs to another game");}
+        self.buildings.remove(id);
+        Ok(())
+    }
 }
 
 fn player_spawn_point(id: ClientId, tile: Option<IVec2>) -> (f32, f32) {
@@ -668,10 +723,20 @@ async fn town_refresh_task(state: AppState) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     loop {
         interval.tick().await;
+        let requested_at=Instant::now();
         if let Ok(Ok(message)) = tokio::time::timeout(Duration::from_secs(2), state.nats.request(SUBJ_TOWN_LIST, "".into())).await {
             if let Ok(towns) = serde_json::from_slice::<Vec<Town>>(&message.payload) {
-                state.world.write().await.towns = towns;
+                let _=state.ctrl_tx.send(ControlMsg::SyncTowns {towns,requested_at});
             }
+        }
+    }
+}
+
+async fn game_end_task(state:AppState) {
+    let Ok(mut sub)=state.nats.subscribe(SUBJ_GAME_ENDED).await else {return;};
+    while let Some(message)=sub.next().await {
+        if let Ok(event)=serde_json::from_slice::<GameEnded>(&message.payload) {
+            let _=state.ctrl_tx.send(ControlMsg::EndGame(event));
         }
     }
 }
@@ -703,6 +768,7 @@ async fn client_socket(state: AppState, socket: WebSocket) {
     let mut forced_id: Option<Uuid> = None;
     let mut initial_town: Option<Town> = None;
     let mut initial_identity: Option<GameIdentity> = None;
+    let mut resume_state:Option<PlayerState>=None;
     let mut prebuffer: Vec<Message> = Vec::new();
 
     if let Some(Ok(msg)) = ws_stream.next().await {
@@ -713,9 +779,10 @@ async fn client_socket(state: AppState, socket: WebSocket) {
                         if let Some(s) = v.get("id").and_then(|idv| idv.as_str()) {
                             if let Ok(parsed) = Uuid::parse_str(s) {
                                 forced_id = Some(parsed);
-                                if let Ok(BackendHello::SetPid { town, identity, .. }) = serde_json::from_str(&txt) {
+                                if let Ok(BackendHello::SetPid { town, identity, resume_state: restored, .. }) = serde_json::from_str(&txt) {
                                     initial_town = town;
                                     initial_identity = identity;
+                                    resume_state=restored;
                                 }
                             }
                         }
@@ -741,7 +808,7 @@ async fn client_socket(state: AppState, socket: WebSocket) {
         Some(town) => GameIdentity::mayor(id, town.id.clone()),
         None => GameIdentity::debug(id),
     });
-    let _ = state.ctrl_tx.send(ControlMsg::Spawn { id, town: initial_town, identity });
+    let _ = state.ctrl_tx.send(ControlMsg::Spawn { id, town: initial_town, identity, resume_state });
 
     let mut writer = tokio::spawn({
         let mut ws_sink = ws_sink;
@@ -763,11 +830,12 @@ async fn client_socket(state: AppState, socket: WebSocket) {
 
     let input_tx = state.input_tx.clone();
     let ping_sink = tx.clone();
+    let ctrl_tx=state.ctrl_tx.clone();
     let mut reader = tokio::spawn(async move {
         for m in prebuffer {
             match m {
                 Message::Text(txt) => {
-                    let _ = handle_text(&input_tx, &ping_sink, id, txt).await;
+                    let _ = handle_text(&input_tx, &ping_sink, &ctrl_tx, id, txt).await;
                 }
                 _ => {}
             }
@@ -776,7 +844,7 @@ async fn client_socket(state: AppState, socket: WebSocket) {
         while let Some(Ok(msg)) = ws_stream.next().await {
             match msg {
                 Message::Text(txt) => {
-                    let _ = handle_text(&input_tx, &ping_sink, id, txt).await;
+                    let _ = handle_text(&input_tx, &ping_sink, &ctrl_tx, id, txt).await;
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -792,13 +860,19 @@ async fn client_socket(state: AppState, socket: WebSocket) {
     }
     reader.abort();
     writer.abort();
-    state.clients.write().await.remove(&id);
-    let _ = state.ctrl_tx.send(ControlMsg::Despawn(id));
+    let mut clients=state.clients.write().await;
+    // A delayed old reader must not despawn a newly resumed connection with
+    // the same player ID, or remove its outbound sender.
+    if clients.get(&id).is_some_and(|current|current.same_channel(&tx)) {
+        clients.remove(&id);
+        let _ = state.ctrl_tx.send(ControlMsg::Despawn(id));
+    }
 }
 
 async fn handle_text(
     input_tx: &mpsc::UnboundedSender<(ClientId, InputMsg)>,
     ping_sink: &mpsc::UnboundedSender<Message>,
+    ctrl_tx: &mpsc::UnboundedSender<ControlMsg>,
     id: ClientId,
     txt: String,
 ) -> Result<(), ()> {
@@ -814,6 +888,7 @@ async fn handle_text(
 
     if let Ok(wrapped) = serde_json::from_str::<MaybeVersioned<ClientMsg>>(&txt) {
         match wrapped.inner {
+            ClientMsg::PauseGame => { let _=ctrl_tx.send(ControlMsg::PauseGame(id)); }
             ClientMsg::Input { up, down, left, right, shoot, ts } => {
                 let _ = input_tx.send((id, InputMsg { up, down, left, right, shoot, ts }));
             }
@@ -1001,8 +1076,9 @@ async fn game_loop(
         let mut sim_events: Vec<ServerEvent> = Vec::new();
         let mut handoff_acks = Vec::new();
         let mut switches = Vec::new();
+        let mut private_messages=Vec::new();
         if last_sim.elapsed() >= SIM_DT {
-            let dt = last_sim.elapsed().as_secs_f32().max(0.0001);
+            let dt = last_sim.elapsed().as_secs_f32().clamp(0.0001,0.1);
             last_sim = Instant::now();
 
             {
@@ -1010,8 +1086,32 @@ async fn game_loop(
 
                 while let Ok(ctrl) = ctrl_rx.try_recv() {
                     match ctrl {
-                        ControlMsg::Spawn { id, town, identity } => w.attach_player(id, town, identity),
+                        ControlMsg::Spawn { id, town, identity, resume_state } => {
+                            if w.ended_games.contains(&identity.game_id) {
+                                private_messages.push((id,serde_json::json!({"type":"game_ended","message":"This town is no longer available."}).to_string()));
+                            } else {
+                                if let Some(restored)=resume_state.filter(|state|state.id==id && state.game.identity==identity) { w.adopt_handoff(restored); }
+                                if !w.attach_player(id,town,identity) {
+                                    w.remove_player(id);
+                                    private_messages.push((id,serde_json::json!({"type":"game_ended","message":"This town allocation has ended or been superseded."}).to_string()));
+                                }
+                            }
+                        }
                         ControlMsg::Despawn(id) => w.remove_player(id),
+                        ControlMsg::SyncTowns {towns,requested_at} => w.sync_towns(towns,requested_at),
+                        ControlMsg::EndGame(event) => {
+                            let ids:Vec<_>=w.players.iter().filter(|(_,p)|p.game.identity.game_id==event.player_id).map(|(id,_)|*id).collect();
+                            w.end_game(event.player_id);
+                            for id in ids { private_messages.push((id,serde_json::json!({"type":"game_ended","message":"Your town's game has ended.","reason":event.reason}).to_string())); }
+                        }
+                        ControlMsg::PauseGame(id) => {
+                            if let Some(player)=w.players.get(&id) {
+                                private_messages.push((id,serde_json::json!({"type":"game_checkpoint","state":player.handoff_state(id)}).to_string()));
+                            }
+                            w.remove_player(id);
+                        }
+                        ControlMsg::InsertBuilding {building,reply}=> {let _=reply.send(w.insert_building(building).map_err(str::to_owned));}
+                        ControlMsg::RemoveBuilding {id,game_id,reply}=> {let _=reply.send(w.remove_building(id,game_id).map_err(str::to_owned));}
                         ControlMsg::AdoptHandoff(request) => {
                             let id = request.player.id;
                             let accepted = w.adopt_handoff(request.player);
@@ -1097,6 +1197,7 @@ async fn game_loop(
                     resolve_circle_vs_tiles(&mut w, &mut nx, &mut ny, PLAYER_RADIUS);
 
                     resolve_vs_enemy_players(id, &combatant, &mut nx, &mut ny, &w.players);
+                    w.buildings.push_circle(&mut nx,&mut ny,PLAYER_RADIUS);
 
                     if let Some(p) = w.players.get_mut(&id) {
                         p.x = nx;
@@ -1104,6 +1205,7 @@ async fn game_loop(
                     }
                 }
                 for b in w.bullets.values_mut() {
+                    b.previous_x=b.x; b.previous_y=b.y;
                     b.x += b.vx * dt;
                     b.y += b.vy * dt;
                 }
@@ -1115,7 +1217,9 @@ async fn game_loop(
                     let mut to_kill: Vec<BulletId> = Vec::new();
                     for (bid, bx, by) in samples {
                         let t = tile_at_world(&mut w, bx, by);
-                        if t.blocks_bullet() {
+                        let bullet=&w.bullets[&bid];
+                        let town=bullet.credit.beneficiary.as_ref().and_then(|owner|owner.town_id.as_deref());
+                        if t.blocks_bullet() || w.buildings.blocks_segment((bullet.previous_x,bullet.previous_y),(bx,by),town) {
                             to_kill.push(bid);
                         }
                     }
@@ -1129,7 +1233,7 @@ async fn game_loop(
                     let bid = w.next_bullet_id;
                     w.bullets.insert(bid, Bullet {
                         id: bid, x, y, vx: dirx * bullet_speed, vy: diry * bullet_speed,
-                        owner, credit, born_ms: now_millis(),
+                        owner, credit, born_ms: now_millis(), previous_x:x, previous_y:y,
                     });
                 }
 
@@ -1193,6 +1297,9 @@ async fn game_loop(
         }
 
         event_buffer.extend(sim_events.drain(..));
+        for (id,text) in private_messages {
+            if let Some(sender)=state.clients.read().await.get(&id) { let _=sender.send(Message::Text(text)); }
+        }
 
         for ack in handoff_acks {
             let _ = state.nats.publish(format!("handoff.{}.ack", ack.from_server), serde_json::to_vec(&ack).unwrap().into()).await;
@@ -1251,13 +1358,14 @@ async fn game_loop(
             last_net = Instant::now();
 
             let p1 = Instant::now();
-            let (players_snapshot, bullets_snapshot, towns_snapshot, game_states) = {
+            let (players_snapshot, bullets_snapshot, towns_snapshot, game_states, resume_states) = {
                 let w = state.world.read().await;
                 let players_snapshot: Vec<(ClientId, f32, f32, f32, i32)> =
                     w.players.iter().map(|(id,p)| (*id, p.x, p.y, p.ang, p.hp)).collect();
                 let bullets_snapshot: Vec<Bullet> = w.bullets.values().cloned().collect();
                 let game_states: HashMap<ClientId, PlayerGameState> = w.players.iter().map(|(id, p)| (*id, p.game.clone())).collect();
-                (players_snapshot, bullets_snapshot, w.towns.clone(), game_states)
+                let resume_states:HashMap<ClientId,PlayerState>=w.players.iter().map(|(id,p)|(*id,p.handoff_state(*id))).collect();
+                (players_snapshot, bullets_snapshot, w.towns.clone(), game_states, resume_states)
             };
             ph.snapshot = 1000.0 * p1.elapsed().as_secs_f32();
 
@@ -1301,15 +1409,16 @@ async fn game_loop(
                 let ox = ptx - VIEW_W/2;
                 let oy = pty - VIEW_H/2;
 
-                let tiles_json = {
+                let (tiles_json,buildings_json) = {
                     let mut w = state.world.write().await;
                     let window = collect_tile_window(&mut w, ox, oy, VIEW_W, VIEW_H);
-                    serde_json::to_string(&window).unwrap()
+                    let buildings=w.buildings.views(WorldRect {x:ox as f32*TILE_PX,y:oy as f32*TILE_PX,width:VIEW_W as f32*TILE_PX,height:VIEW_H as f32*TILE_PX});
+                    (serde_json::to_string(&window).unwrap(),serde_json::to_string(&buildings).unwrap())
                 };
 
                 let txt = format!(
-                    r#"{{"v":1,"type":"state","t":{},"me":"{}","players":{},"bullets":{},"tiles":{},"towns":{},"catalog_version":{},"self_state":{},"player_affiliations":{},"events":{}}}"#,
-                    tms, id, players_json, bullets_json, tiles_json, towns_json, DOMAIN_VERSION, self_json, affiliations_json, events_json
+                    r#"{{"v":1,"type":"state","t":{},"me":"{}","players":{},"bullets":{},"tiles":{},"towns":{},"catalog_version":{},"self_state":{},"player_affiliations":{},"events":{},"buildings":{},"resume_state":{}}}"#,
+                    tms, id, players_json, bullets_json, tiles_json, towns_json, DOMAIN_VERSION, self_json, affiliations_json, events_json, buildings_json, serde_json::to_string(&resume_states[&id]).unwrap()
                 );
 
                 let _ = ch.send(Message::Text(txt));
@@ -1378,7 +1487,10 @@ mod spawn_tests {
         for slot in [0, 1, 4, 20] {
             let hall = twz_shared::hall_for_slot(slot);
             let tile = twz_shared::spawn_from_hall(hall.origin);
-            assert!(matches!(terrain_at_tile(hall.origin.x, hall.origin.y), Tile::Town));
+            assert!(matches!(terrain_at_tile(hall.origin.x, hall.origin.y), Tile::Ground));
+            let mut world=World::default();
+            get_chunk(&mut world,hall.cell.0,hall.cell.1);
+            assert!(world.buildings.buildings.contains_key(&twz_shared::hall_entity_id(hall.origin)));
             assert!(matches!(terrain_at_tile(tile.x, tile.y), Tile::Ground));
             let (x, y) = player_spawn_point(Uuid::new_v4(), Some(tile));
             assert_eq!(world_to_tile(x, y), (tile.x, tile.y));
@@ -1388,7 +1500,7 @@ mod spawn_tests {
 
     #[test]
     fn connections_and_respawns_use_ground_below_a_generated_hall() {
-        assert!(matches!(terrain_at_tile(TOWN_OFFSET, TOWN_OFFSET), Tile::Town));
+        assert!(matches!(terrain_at_tile(TOWN_OFFSET, TOWN_OFFSET), Tile::Ground));
         let expected = twz_shared::spawn_from_hall(IVec2 {
             x: TOWN_OFFSET,
             y: TOWN_OFFSET,

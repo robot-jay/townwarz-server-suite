@@ -328,7 +328,7 @@
                     for (let j = 0; j < h; j++) {
                         for (let i = 0; i < w; i++) {
                             const t = data[j * w + i];
-                            // 0=ground,1=water,2=rock,3=town
+                            // 0=ground,1=water,2=rock; 3 is a legacy hall marker.
                             let fill = null;
                             if (t === 0) fill = '#8b5a2b';      
                             else if (t === 1) fill = '#1e90ff'; 
@@ -348,6 +348,22 @@
                             ctx.fillStyle = fill;
                             ctx.fillRect(sx, sy, TILE, TILE);
                         }
+                    }
+                }
+
+                for (const building of lastState.buildings || []) {
+                    const x = toSX(building.origin_tile.x * TILE);
+                    const y = toSY(building.origin_tile.y * TILE);
+                    const { footprint_tiles, collision_px } = building.geometry;
+                    const width = footprint_tiles.x * TILE;
+                    const height = footprint_tiles.y * TILE;
+                    ctx.fillStyle = '#839076';
+                    ctx.fillRect(x, y + collision_px.height, width, height - collision_px.height);
+                    ctx.fillStyle = '#c7af76';
+                    ctx.fillRect(x + collision_px.x, y + collision_px.y, collision_px.width, collision_px.height);
+                    if (building.town_name) {
+                        ctx.save(); ctx.fillStyle = '#fff'; ctx.font = '14px sans-serif'; ctx.textAlign = 'center';
+                        ctx.fillText(building.town_name, x + width / 2, y - 8); ctx.restore();
                     }
                 }
 

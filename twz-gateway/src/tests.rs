@@ -1,4 +1,5 @@
 use super::*;
+use twz_shared::GameSession;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle, time::timeout};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -92,7 +93,8 @@ async fn authenticated_entry_verifies_user_creates_named_town_and_ends_on_discon
             id: "test-town".into(), name: request.desired_name, hall: twz_shared::hall_for_slot(0),
             created_at_ms: 1, mayor_player_id: request.player_id,
         };
-        let response = CreateTownResponse { ok:true, error:None, spawn_tile:Some(twz_shared::spawn_from_hall(town.hall.origin)), town:Some(town) };
+        let response = CreateTownResponse { ok:true, error:None, spawn_tile:Some(twz_shared::spawn_from_hall(town.hall.origin)),
+            connection_id:Some(uuid::Uuid::new_v4()),player_state:Some(PlayerState::initial_for_town(&town)),town:Some(town) };
         nats.publish(message.reply.unwrap(), serde_json::to_vec(&response).unwrap().into()).await.unwrap();
         request.player_id
     });
@@ -107,13 +109,16 @@ async fn authenticated_entry_verifies_user_creates_named_town_and_ends_on_discon
     assert_eq!(identity["identity"]["game_id"], pid.to_string());
     assert_eq!(identity["identity"]["town_id"], "test-town");
     assert_eq!(identity["identity"]["role"], "mayor");
-    drop(client);
-    timeout(TEST_TIMEOUT, &mut backend.disconnected).await??;
+    client.send(TMsg::Text("{\"type\":\"quit_game\"}".into())).await?;
     loop {
         let message = timeout(TEST_TIMEOUT, ends.next()).await?.unwrap();
         let ended: GameSession = serde_json::from_slice(&message.payload)?;
-        if ended.player_id == pid { break; }
+        if ended.player_id == pid {
+            if let Some(reply)=message.reply {state.nats.publish(reply,br#"{"ok":true}"#.to_vec().into()).await?;}
+            break;
+        }
     }
+    timeout(TEST_TIMEOUT, &mut backend.disconnected).await??;
     assert!(state.switches.read().await.is_empty());
     conductor_task.abort();
     gateway_task.abort();
@@ -122,24 +127,24 @@ async fn authenticated_entry_verifies_user_creates_named_town_and_ends_on_discon
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_NATS_URL and TEST_CONDUCTOR_URL with running PostgreSQL conductor/cells"]
-async fn authenticated_entry_live_cells_spawn_label_and_start_fresh() -> Result<()> {
-    async fn state_for(client: &mut BackendSocket, name: &str) -> Result<serde_json::Value> {
-        Ok(timeout(Duration::from_secs(6), async {
+async fn authenticated_entry_live_cells_geometry_resume_and_terminal_end() -> Result<()> {
+    async fn value_for(client:&mut BackendSocket,kind:&str)->Result<serde_json::Value> {
+        timeout(Duration::from_secs(6),async {
             loop {
-                let frame = client.next().await.ok_or_else(|| anyhow::anyhow!("game disconnected"))??;
-                if let TMsg::Text(text) = frame {
-                    let state: serde_json::Value = serde_json::from_str(&text)?;
-                    if state["type"] == "game_error" { anyhow::bail!("{}", state["message"]); }
-                    if state["type"] == "state" && state["towns"].as_array().is_some_and(|towns| towns.iter().any(|town| town["name"] == name)) {
-                        return Ok::<_, anyhow::Error>(state);
-                    }
+                let frame=client.next().await.ok_or_else(||anyhow::anyhow!("game disconnected"))??;
+                if let TMsg::Text(text)=frame {
+                    let value:serde_json::Value=serde_json::from_str(&text)?;
+                    if value["type"]=="game_error" {anyhow::bail!("{}",value["message"]);}
+                    if value["type"]==kind {return Ok(value);}
                 }
             }
-        }).await??)
+        }).await?
     }
-    async fn enter(url: &str, token: &serde_json::Value, name: &str) -> Result<BackendSocket> {
-        let (mut client, _) = connect_async(url).await?;
-        client.send(TMsg::Text(serde_json::json!({"type":"start_game","role":"mayor","id_token":token,"town_name":name}).to_string())).await?;
+    async fn enter(url:&str,token:&serde_json::Value,name:Option<&str>)->Result<BackendSocket> {
+        let (mut client,_)=connect_async(url).await?;
+        let message=if let Some(name)=name {serde_json::json!({"type":"start_game","role":"mayor","id_token":token,"town_name":name})}
+            else {serde_json::json!({"type":"resume_game","id_token":token})};
+        client.send(TMsg::Text(message.to_string())).await?;
         Ok(client)
     }
     let nats = async_nats::connect(std::env::var("TEST_NATS_URL")?).await?;
@@ -152,38 +157,46 @@ async fn authenticated_entry_live_cells_spawn_label_and_start_fresh() -> Result<
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("ws://{}/play", listener.local_addr()?);
     let gateway_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let mut first = enter(&url, &tokens["valid"], "Integration North").await?;
-    let initial = state_for(&mut first, "Integration North").await?;
-    let first_pid = initial["me"].as_str().unwrap().to_owned();
-    let town = initial["towns"].as_array().unwrap().iter().find(|t| t["mayor_player_id"] == first_pid).unwrap();
-    let hall = town["hall"]["origin"].clone();
-    let player = initial["players"].as_array().unwrap().iter().find(|p| p[0] == first_pid).unwrap();
-    assert_eq!(player[1].as_f64().unwrap(), (hall["x"].as_i64().unwrap() + 1) as f64 * 48.0);
-    assert_eq!(player[2].as_f64().unwrap(), (hall["y"].as_i64().unwrap() + 3) as f64 * 48.0);
-    let mut second = enter(&url, &tokens["valid"], "Integration South").await?;
-    let second_state = state_for(&mut second, "Integration South").await?;
-    let second_pid = second_state["me"].as_str().unwrap().to_owned();
-    assert_ne!(first_pid, second_pid);
-    let both = state_for(&mut first, "Integration South").await?;
-    let other_hall = &both["towns"].as_array().unwrap().iter().find(|t| t["mayor_player_id"] == second_pid).unwrap()["hall"]["origin"];
-    assert_ne!(&hall, other_hall);
+    let mut promotions=nats.subscribe(twz_shared::SUBJ_PROMOTION_REQUESTED).await?;
+    nats.flush().await?;
+    let mut first=enter(&url,&tokens["valid"],Some("Integration North")).await?;
+    let initial=value_for(&mut first,"state").await?;
+    let pid=initial["me"].as_str().unwrap().to_owned();
+    let hall=initial["buildings"].as_array().unwrap().iter().find(|b|b["ownership"]["game_id"]==pid).unwrap().clone();
+    assert_eq!(hall["geometry"]["footprint_tiles"],serde_json::json!({"x":3,"y":3}));
+    assert_eq!(hall["geometry"]["collision_px"]["height"],96);
+    first.send(TMsg::Text(serde_json::json!({"type":"input","up":true,"down":false,"left":false,"right":false,"shoot":false,"ts":1}).to_string())).await?;
+    tokio::time::sleep(Duration::from_millis(150)).await;
     drop(first);
-    timeout(Duration::from_secs(6), async {
+    let mut resumed=timeout(Duration::from_secs(8),async {
         loop {
-            let reply = nats.request(twz_shared::SUBJ_TOWN_LIST, "".into()).await.unwrap();
-            let towns: Vec<Town> = serde_json::from_slice(&reply.payload).unwrap();
-            if !towns.iter().any(|town| town.mayor_player_id.to_string() == first_pid) { break; }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut attempt=enter(&url,&tokens["valid"],None).await?;
+            match value_for(&mut attempt,"state").await {
+                Ok(value)=>return Ok::<_,anyhow::Error>((attempt,value)),
+                Err(_)=>tokio::time::sleep(Duration::from_millis(100)).await,
+            }
         }
-    }).await?;
-    let mut third = enter(&url, &tokens["valid"], "Integration Fresh").await?;
-    let fresh = state_for(&mut third, "Integration Fresh").await?;
-    assert_ne!(fresh["me"], first_pid);
-    let fresh_town = fresh["towns"].as_array().unwrap().iter().find(|t| t["mayor_player_id"] == fresh["me"]).unwrap();
-    assert_eq!(fresh_town["hall"]["origin"], hall);
-    drop(second);
-    drop(third);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    }).await??;
+    assert_eq!(resumed.1["me"],pid);
+    assert!(resumed.1["resume_state"]["x"].as_f64().unwrap()>initial["resume_state"]["x"].as_f64().unwrap());
+    assert_eq!(resumed.1["self_state"]["identity"],initial["self_state"]["identity"]);
+    let end=EndGameRequest {player_id:pid.parse()?,connection_id:None,reason:GameEndReason::Orbed};
+    play::operation(&nats,SUBJ_GAME_END,&end).await?;
+    value_for(&mut resumed.0,"game_ended").await?;
+    let mut unavailable=enter(&url,&tokens["valid"],None).await?;
+    value_for(&mut unavailable,"no_game").await?;
+    let mut fresh=enter(&url,&tokens["valid"],Some("Integration Fresh")).await?;
+    let fresh_state=value_for(&mut fresh,"state").await?;
+    assert_ne!(fresh_state["me"],pid);
+    let new_hall=fresh_state["buildings"].as_array().unwrap().iter().find(|b|b["ownership"]["game_id"]==fresh_state["me"]).unwrap();
+    assert_eq!(new_hall["id"],hall["id"],"physical hall is reused, not duplicated");
+    fresh.send(TMsg::Text("{\"type\":\"quit_game\"}".into())).await?;
+    value_for(&mut fresh,"game_quit_ack").await?;
+    let promotion=timeout(TEST_TIMEOUT,promotions.next()).await?.unwrap();
+    let promotion:serde_json::Value=serde_json::from_slice(&promotion.payload)?;
+    assert_eq!(promotion["outcome"],"no_successors");
+    let mut unavailable=enter(&url,&tokens["valid"],None).await?;
+    value_for(&mut unavailable,"no_game").await?;
     gateway_task.abort();
     Ok(())
 }

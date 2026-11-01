@@ -44,10 +44,19 @@ pub enum ProductionState {
 pub struct BuildingInstance {
     pub id: EntityId,
     pub building_type: BuildingType,
-    pub ownership: EntityOwnership,
+    /// None is a physical neutral hall, not an unallocated player session.
+    pub ownership: Option<EntityOwnership>,
     pub origin_tile: IVec2,
     pub health: Health,
     pub production: Option<ProductionState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildingView {
+    #[serde(flatten)]
+    pub instance: BuildingInstance,
+    pub geometry: super::GeometryDefinition,
+    pub town_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

@@ -87,7 +87,7 @@ fn projectile_allegiance_and_credit_survive_shooter_removal() {
     let owner = GameIdentity::mayor(owner_id, "town-a".into());
     let projectile = Bullet {
         id: 1, x: 0.0, y: 0.0, vx: 300.0, vy: 0.0, owner: owner_id,
-        born_ms: 0, credit: credit(owner_id, &owner),
+        born_ms: 0, credit: credit(owner_id, &owner), previous_x:0.0, previous_y:0.0,
     };
     let mut world = World::default();
     world.attach_player(owner_id, None, owner.clone());
@@ -138,6 +138,37 @@ fn rejected_or_unrelated_handoff_ack_cannot_delete_the_wallet() {
     assert!(!world.complete_handoff(&ack));
     assert_eq!(world.players[&id].game.wallet.cash, 100);
     assert!(!world.players[&id].transferring);
+}
+
+#[test]
+fn ending_a_game_removes_assets_and_stale_directory_cannot_reclaim_its_hall() {
+    use twz_shared::{BuildingType,BuildingInstance,Health,ItemBuildingInstance,ItemBuildingType,DeployedState,WorldPoint,hall_entity_id};
+    let id=Uuid::new_v4();
+    let identity=GameIdentity::mayor(id,"town-a".into());
+    let town=Town {id:"town-a".into(),name:"Town A".into(),hall:twz_shared::hall_for_slot(0),created_at_ms:1,mayor_player_id:id};
+    let mut world=World::default();world.attach_player(id,Some(town.clone()),identity.clone());
+    let owner=EntityOwnership {game_id:id,town_id:Some(town.id.clone()),owner_player_id:Some(id)};
+    let factory_id=Uuid::new_v4();
+    world.insert_building(BuildingInstance {id:factory_id,building_type:BuildingType::WallFactory,ownership:Some(owner.clone()),
+        origin_tile:IVec2{x:13,y:16},health:Health{current:255,maximum:255},production:None}).unwrap();
+    let pickup=item(id,&identity);world.buildings.items.insert(pickup.id,pickup);
+    let deployment_id=Uuid::new_v4();
+    world.buildings.deployments.insert(deployment_id,ItemBuildingInstance {id:deployment_id,item_building_type:ItemBuildingType::Wall,
+        ownership:owner,position:WorldPoint{x:1000.0,y:1000.0},angle_radians:0.0,health:Health{current:100,maximum:100},behavior:DeployedState::Wall});
+    let old_request=Instant::now();
+    let saved=world.players[&id].handoff_state(id);
+    world.end_game(id);
+    world.sync_towns(vec![town.clone()],old_request);
+    assert!(!world.buildings.buildings.contains_key(&factory_id));
+    assert!(world.buildings.items.is_empty() && world.buildings.deployments.is_empty());
+    assert!(!world.adopt_handoff(saved));
+    let hall=&world.buildings.buildings[&hall_entity_id(town.hall.origin)];
+    assert!(hall.ownership.is_none());
+    assert!(world.towns.is_empty());
+    let mut replacement=town;replacement.id="town-b".into();replacement.created_at_ms+=1;replacement.mayor_player_id=Uuid::new_v4();
+    world.attach_player(replacement.mayor_player_id,Some(replacement.clone()),GameIdentity::mayor(replacement.mayor_player_id,replacement.id.clone()));
+    world.end_game(id);
+    assert_eq!(world.buildings.buildings[&hall_entity_id(replacement.hall.origin)].ownership.as_ref().unwrap().game_id,replacement.mayor_player_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -195,7 +226,7 @@ async fn live_handoff_preserves_nonempty_state_through_nats_and_websocket_attach
     let source_world = cells[0].0.world.clone();
     let source_clients = cells[0].0.clients.clone();
     let (mut source, _) = connect_async(&endpoints[0]).await?;
-    let hello = serde_json::to_string(&BackendHello::SetPid { id, town:None, identity:Some(identity) })?;
+    let hello = serde_json::to_string(&BackendHello::SetPid { id, town:None, identity:Some(identity), resume_state:None })?;
     source.send(ClientFrame::Text(hello.clone())).await?;
     timeout(Duration::from_secs(5), async {
         while !source_clients.read().await.contains_key(&id) {
