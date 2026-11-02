@@ -1,7 +1,8 @@
 use super::*;
 use twz_shared::{
-    ExistingGameSummary, GameLookupResponse, QuitUserGameRequest, ResumeGameRequest, CELL_TILES,
-    SUBJ_GAME_CHECK, SUBJ_GAME_DISCONNECT, SUBJ_GAME_QUIT_USER, SUBJ_GAME_RESUME, TILE_PX,
+    AcknowledgeExpiryRequest, GameLookupResponse, QuitUserGameRequest, ResumeGameRequest,
+    CELL_TILES, SUBJ_EXPIRY_ACK, SUBJ_GAME_CHECK, SUBJ_GAME_DISCONNECT, SUBJ_GAME_QUIT_USER,
+    SUBJ_GAME_RESUME, TILE_PX,
 };
 
 pub(super) async fn operation<T: serde::Serialize>(
@@ -28,7 +29,7 @@ pub(super) async fn operation<T: serde::Serialize>(
 async fn lookup_game(
     nats: &async_nats::Client,
     user: &twz_shared::GameUser,
-) -> Result<Option<ExistingGameSummary>> {
+) -> Result<GameLookupResponse> {
     let reply = tokio::time::timeout(
         Duration::from_secs(5),
         nats.request(
@@ -43,9 +44,28 @@ async fn lookup_game(
         "{}",
         response
             .error
-            .unwrap_or_else(|| "Unable to check your existing town.".into())
+            .as_deref()
+            .unwrap_or("Unable to check your existing town.")
     );
-    Ok(response.game)
+    Ok(response)
+}
+
+fn lookup_message(response: GameLookupResponse) -> serde_json::Value {
+    if let Some(game) = response.game {
+        serde_json::json!({"type":"existing_game","game":game})
+    } else if let Some(notice) = response.expired_game {
+        serde_json::json!({"type":"grace_expired","notice":notice})
+    } else {
+        serde_json::json!({"type":"no_game"})
+    }
+}
+
+enum EntryAction {
+    Check,
+    Start(String),
+    Resume,
+    Quit(Option<twz_shared::ClientId>),
+    AcknowledgeExpiry(twz_shared::ClientId),
 }
 
 pub(super) async fn session(state: AppState, mut client: WebSocket) {
@@ -57,8 +77,8 @@ pub(super) async fn session(state: AppState, mut client: WebSocket) {
         };
         let entry: GameEntry = serde_json::from_str(&text)
             .map_err(|_| anyhow::anyhow!("Expected a game entry request."))?;
-        let (token, name, quit, check, abandon_id) = match entry {
-            GameEntry::CheckGame { id_token } => (id_token, None, false, true, None),
+        let (token, action) = match entry {
+            GameEntry::CheckGame { id_token } => (id_token, EntryAction::Check),
             GameEntry::StartGame {
                 id_token,
                 role,
@@ -70,18 +90,19 @@ pub(super) async fn session(state: AppState, mut client: WebSocket) {
                 );
                 (
                     id_token,
-                    Some(validate_town_name(&town_name).map_err(anyhow::Error::msg)?),
-                    false,
-                    false,
-                    None,
+                    EntryAction::Start(validate_town_name(&town_name).map_err(anyhow::Error::msg)?),
                 )
             }
-            GameEntry::ResumeGame { id_token } => (id_token, None, false, false, None),
-            GameEntry::QuitGame { id_token } => (id_token, None, true, false, None),
+            GameEntry::ResumeGame { id_token } => (id_token, EntryAction::Resume),
+            GameEntry::QuitGame { id_token } => (id_token, EntryAction::Quit(None)),
             GameEntry::AbandonGame {
                 id_token,
                 player_id,
-            } => (id_token, None, true, false, Some(player_id)),
+            } => (id_token, EntryAction::Quit(Some(player_id))),
+            GameEntry::AcknowledgeExpiry {
+                id_token,
+                player_id,
+            } => (id_token, EntryAction::AcknowledgeExpiry(player_id)),
         };
         let auth = state.auth.as_ref().ok_or_else(|| {
             anyhow::anyhow!("The gateway needs AUTH0_DOMAIN and AUTH0_CLIENT_ID configured.")
@@ -89,30 +110,39 @@ pub(super) async fn session(state: AppState, mut client: WebSocket) {
         let user = auth.verify(&state.http, &token).await.map_err(|_| {
             anyhow::anyhow!("Your sign-in could not be verified. Sign out and sign in again.")
         })?;
-        if check {
-            let game = lookup_game(&state.nats, &user).await?;
-            let message = match game {
-                Some(game) => serde_json::json!({"type":"existing_game","game":game}),
-                None => serde_json::json!({"type":"no_game"}),
-            };
-            client.send(AxumMsg::Text(message.to_string())).await?;
-            return Ok(None);
-        }
-        if quit {
-            operation(
-                &state.nats,
-                SUBJ_GAME_QUIT_USER,
-                &QuitUserGameRequest {
-                    user,
-                    player_id: abandon_id,
-                },
-            )
-            .await?;
-            client
-                .send(AxumMsg::Text("{\"type\":\"game_quit_ack\"}".into()))
+        let name = match action {
+            EntryAction::Check => {
+                let message = lookup_message(lookup_game(&state.nats, &user).await?);
+                client.send(AxumMsg::Text(message.to_string())).await?;
+                return Ok(None);
+            }
+            EntryAction::Quit(player_id) => {
+                operation(
+                    &state.nats,
+                    SUBJ_GAME_QUIT_USER,
+                    &QuitUserGameRequest { user, player_id },
+                )
                 .await?;
-            return Ok::<_, anyhow::Error>(None);
-        }
+                client
+                    .send(AxumMsg::Text("{\"type\":\"game_quit_ack\"}".into()))
+                    .await?;
+                return Ok(None);
+            }
+            EntryAction::AcknowledgeExpiry(player_id) => {
+                operation(
+                    &state.nats,
+                    SUBJ_EXPIRY_ACK,
+                    &AcknowledgeExpiryRequest { user, player_id },
+                )
+                .await?;
+                client
+                    .send(AxumMsg::Text("{\"type\":\"expiry_notice_ack\"}".into()))
+                    .await?;
+                return Ok(None);
+            }
+            EntryAction::Start(name) => Some(name),
+            EntryAction::Resume => None,
+        };
         let lookup_user = user.clone();
         let reply = if let Some(desired_name) = name {
             is_new = true;
@@ -140,11 +170,10 @@ pub(super) async fn session(state: AppState, mut client: WebSocket) {
         let response: CreateTownResponse = serde_json::from_slice(&reply.payload)?;
         if !response.ok {
             if is_new {
-                if let Some(game) = lookup_game(&state.nats, &lookup_user).await? {
+                let lookup = lookup_game(&state.nats, &lookup_user).await?;
+                if lookup.game.is_some() {
                     client
-                        .send(AxumMsg::Text(
-                            serde_json::json!({"type":"existing_game","game":game}).to_string(),
-                        ))
+                        .send(AxumMsg::Text(lookup_message(lookup).to_string()))
                         .await?;
                     return Ok(None);
                 }
@@ -157,9 +186,8 @@ pub(super) async fn session(state: AppState, mut client: WebSocket) {
             );
         }
         let Some(town) = response.town else {
-            client
-                .send(AxumMsg::Text("{\"type\":\"no_game\"}".into()))
-                .await?;
+            let message = lookup_message(lookup_game(&state.nats, &lookup_user).await?);
+            client.send(AxumMsg::Text(message.to_string())).await?;
             return Ok(None);
         };
         let connection_id = response.connection_id.ok_or_else(|| {

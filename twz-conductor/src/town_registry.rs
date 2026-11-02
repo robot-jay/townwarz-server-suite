@@ -25,6 +25,7 @@ impl TownRegistry {
         let mut creates = self.nats.subscribe(SUBJ_TOWN_CREATE).await?;
         let mut resumes = self.nats.subscribe(SUBJ_GAME_RESUME).await?;
         let mut checks = self.nats.subscribe(SUBJ_GAME_CHECK).await?;
+        let mut expiry_acks = self.nats.subscribe(SUBJ_EXPIRY_ACK).await?;
         let mut quits = self.nats.subscribe(SUBJ_GAME_QUIT_USER).await?;
         let mut lists = self.nats.subscribe(SUBJ_TOWN_LIST).await?;
         let mut ends = self.nats.subscribe(SUBJ_GAME_END).await?;
@@ -56,13 +57,22 @@ impl TownRegistry {
                         let result = async {
                             this.expire_leases().await?;
                             let request: ResumeGameRequest = serde_json::from_slice(&message.payload)?;
-                            this.games.active_game_summary(&request.user.sub).await
+                            let game = this.games.active_game_summary(&request.user.sub).await?;
+                            let expired_game = if game.is_none() { this.games.expired_game_notice(&request.user.sub).await? } else { None };
+                            Ok::<_, anyhow::Error>((game, expired_game))
                         }.await;
                         let response = match result {
-                            Ok(game) => GameLookupResponse { ok: true, error: None, game },
-                            Err(error) => GameLookupResponse { ok: false, error: Some(error.to_string()), game: None },
+                            Ok((game, expired_game)) => GameLookupResponse { ok: true, error: None, game, expired_game },
+                            Err(error) => GameLookupResponse { ok: false, error: Some(error.to_string()), game: None, expired_game: None },
                         };
                         (message, serde_json::to_vec(&response).unwrap())
+                    }
+                    Some(message) = expiry_acks.next() => {
+                        let result = async {
+                            let request: AcknowledgeExpiryRequest = serde_json::from_slice(&message.payload)?;
+                            this.games.acknowledge_expiry(&request.user.sub, request.player_id).await
+                        }.await;
+                        (message, Self::operation_response(result))
                     }
                     Some(message) = lists.next() => {
                         let response = match this.games.active_towns().await {

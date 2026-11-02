@@ -20,6 +20,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub checkpoint_json: Option<Json>,
     pub end_reason: Option<String>,
+    pub expiry_notice_ack_at: Option<DateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

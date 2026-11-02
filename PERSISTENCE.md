@@ -24,6 +24,8 @@ SeaORM handles profile upsert, new game insertion, active-account checks, active
 
 Game-entry metadata uses `active_game_summary`, a read-only five-column ORM projection with no checkpoint retrieval or session-token update. The authenticated check endpoint runs normal expiry housekeeping before this lookup. Targeted abandonment filters the subject's active IDs against the displayed game ID before invoking the existing terminal/promotion operation.
 
+When there is no active personal game, `expired_game_notice` projects the latest participation's end metadata, not its private checkpoint. It reports only an unacknowledged timeout, with original-town availability and future per-role vacancies. `acknowledge_expiry` uses an authenticated-subject/game-ID scoped ORM update. Migration `003_expiry_notice.sql` stores the acknowledgement timestamp; existing history remains intact.
+
 The repository owns a SQLx connection pool (minimum 1, maximum 10, eight-second connect/acquire timeouts). Cloned repositories share that pool; independent instances can use separate pools against the same database. Statement logging is disabled by default. Driver TLS behavior follows the PostgreSQL connection URL and SQLx defaults.
 
 ## Why some SQL remains
@@ -41,7 +43,7 @@ All runtime values in these statements are bound parameters. The standalone SQL 
 
 ## Schema and configuration
 
-Use the existing workspace-root `.env` and `DATABASE_URL`. No new environment keys or schema/data migration are required for the ORM refactor. The repository applies the unchanged idempotent `001_games.sql` and `002_reconnect.sql` files transactionally at startup, protected by a separate migration advisory lock. Entity definitions map the existing schema; they do not automatically recreate tables or synchronize/drop columns.
+Use the existing workspace-root `.env` and `DATABASE_URL`. The ORM refactor itself required no schema/data change. Startup applies the idempotent `001_games.sql`, `002_reconnect.sql`, and `003_expiry_notice.sql` files transactionally, protected by a separate migration advisory lock. The third migration adds the later acknowledge-once expiry notice. Entity definitions map the schema; they do not automatically recreate tables or synchronize/drop columns.
 
 Gameplay and wire behavior remain the same: player-owned wallets, checkpoints, 15-minute reconnect grace, stale-token fencing, explicit quit, promotion hooks, and terminal Orb handling.
 

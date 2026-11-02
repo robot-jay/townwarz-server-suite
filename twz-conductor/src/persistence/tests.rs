@@ -231,6 +231,188 @@ async fn postgres_grace_resume_fencing_quit_orb_and_expiry() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires an isolated TEST_DATABASE_URL"]
+async fn postgres_expiry_notices_are_once_scoped_and_bound_to_original_town() -> Result<()> {
+    let _fixtures = FIXTURES.lock().await;
+    let url = std::env::var("TEST_DATABASE_URL")?;
+    let repository = GameRepository::connect(&url).await?;
+    let account = user();
+    let other = user();
+    let initial = repository
+        .create_game(&account, ClientId::new_v4(), "Forgotten Town")
+        .await?;
+    let old_town = initial.town.clone();
+    let old_row = games::Entity::find_by_id(old_town.mayor_player_id.to_string())
+        .one(&repository.db)
+        .await?
+        .unwrap();
+    let mut checkpoint = initial.player_state;
+    checkpoint.game.wallet.credit(1000).unwrap();
+    checkpoint.game.inventory.slots[0] = Some(ItemInstance {
+        id: ClientId::new_v4(),
+        item_type: ItemType::Wall,
+        ownership: EntityOwnership {
+            game_id: old_town.mayor_player_id,
+            town_id: Some(old_town.id.clone()),
+            owner_player_id: Some(old_town.mayor_player_id),
+        },
+        source_building_id: None,
+    });
+    repository
+        .update_connection(
+            &GameConnection {
+                player_id: old_town.mayor_player_id,
+                connection_id: initial.connection_id,
+                checkpoint: Some(checkpoint),
+            },
+            true,
+        )
+        .await?;
+    games::Entity::update_many()
+        .col_expr(
+            games::Column::DisconnectedAt,
+            Expr::cust("CURRENT_TIMESTAMP - INTERVAL '16 minutes'"),
+        )
+        .filter(games::Column::PlayerId.eq(old_town.mayor_player_id.to_string()))
+        .exec(&repository.db)
+        .await?;
+    assert!(repository
+        .expire_games()
+        .await?
+        .iter()
+        .any(|town| town.id == old_town.id));
+    let notice = repository.expired_game_notice(&account.sub).await?.unwrap();
+    assert_eq!(notice.player_id, old_town.mayor_player_id);
+    assert_eq!(notice.town_name, "Forgotten Town");
+    assert_eq!(notice.grace_period_seconds, 900);
+    assert!(!notice.former_town.is_active);
+    assert!(!notice.former_town.rejoin_supported);
+    assert_eq!(notice.former_town.roles[0].capacity, 1);
+    assert_eq!(notice.former_town.roles[1].capacity, 4);
+    assert!(notice.former_town.roles.iter().all(|role| !role.can_join));
+    assert!(matches!(
+        notice.former_town.state_on_join,
+        RejoinStatePolicy::Fresh
+    ));
+    assert!(repository.resume_game(&account.sub).await?.is_none());
+    repository
+        .acknowledge_expiry(&other.sub, old_town.mayor_player_id)
+        .await?;
+    assert!(
+        repository
+            .expired_game_notice(&account.sub)
+            .await?
+            .is_some(),
+        "another account cannot dismiss this notice"
+    );
+
+    // A new town occupying the old physical hall is not the original town.
+    let replacement = repository
+        .create_game(&other, ClientId::new_v4(), "Different Town")
+        .await?;
+    let mut replacement_town = replacement.town.clone();
+    replacement_town.hall = old_town.hall.clone();
+    let mut replacement_row =
+        games::Entity::find_by_id(replacement.town.mayor_player_id.to_string())
+            .one(&repository.db)
+            .await?
+            .unwrap()
+            .into_active_model();
+    replacement_row.hall_slot = Set(old_row.hall_slot);
+    replacement_row.town_json = Set(serde_json::to_value(replacement_town)?);
+    replacement_row.update(&repository.db).await?;
+    assert!(
+        !repository
+            .expired_game_notice(&account.sub)
+            .await?
+            .unwrap()
+            .former_town
+            .is_active
+    );
+    assert!(repository.expired_game_notice(&other.sub).await?.is_none());
+
+    repository
+        .acknowledge_expiry(&account.sub, old_town.mayor_player_id)
+        .await?;
+    repository
+        .acknowledge_expiry(&account.sub, old_town.mayor_player_id)
+        .await?;
+    let reopened = GameRepository::connect(&url).await?;
+    assert!(
+        reopened.expired_game_notice(&account.sub).await?.is_none(),
+        "acknowledgement survives new connections/logins"
+    );
+    let next = repository
+        .create_game(&account, ClientId::new_v4(), "Fresh Participation")
+        .await?;
+    assert_ne!(next.town.mayor_player_id, old_town.mayor_player_id);
+    assert_ne!(next.town.id, old_town.id);
+    assert_eq!(next.player_state.game.wallet.cash, 0);
+    assert!(next
+        .player_state
+        .game
+        .inventory
+        .slots
+        .iter()
+        .all(Option::is_none));
+    assert_eq!(next.player_state.hp, next.player_state.max_hp);
+    repository
+        .end_game(&EndGameRequest {
+            player_id: next.town.mayor_player_id,
+            connection_id: Some(next.connection_id),
+            reason: GameEndReason::Orbed,
+        })
+        .await?;
+    assert!(
+        repository
+            .expired_game_notice(&account.sub)
+            .await?
+            .is_none(),
+        "Orb defeat is not grace expiry"
+    );
+
+    // An unacknowledged older timeout must not override a later participation's
+    // intentional departure when deciding what the returning player last lost.
+    let older = repository
+        .create_game(&account, ClientId::new_v4(), "Older Timeout")
+        .await?;
+    repository
+        .end_game(&EndGameRequest {
+            player_id: older.town.mayor_player_id,
+            connection_id: Some(older.connection_id),
+            reason: GameEndReason::Timeout,
+        })
+        .await?;
+    assert!(
+        repository
+            .expired_game_notice(&account.sub)
+            .await?
+            .is_some(),
+        "latest timeout missing from history: {:?}",
+        games::Entity::find()
+            .filter(games::Column::Auth0Sub.eq(&account.sub))
+            .all(&repository.db)
+            .await?
+    );
+    let latest = repository
+        .create_game(&account, ClientId::new_v4(), "Later Departure")
+        .await?;
+    repository
+        .end_game(&EndGameRequest {
+            player_id: latest.town.mayor_player_id,
+            connection_id: Some(latest.connection_id),
+            reason: GameEndReason::IntentionalQuit,
+        })
+        .await?;
+    assert!(repository
+        .expired_game_notice(&account.sub)
+        .await?
+        .is_none());
+    cleanup(&repository, &[&account.sub, &other.sub]).await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires an isolated TEST_DATABASE_URL"]
 async fn postgres_concurrent_claims_and_resumes_use_database_locks() -> Result<()> {

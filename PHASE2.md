@@ -58,6 +58,8 @@ Backend `set_pid` now optionally carries `resume_state`. It is sent only on init
 
 After Auth0 login or page refresh, the React client checks for an existing game without entering it. Its entry screen offers explicit Resume or Abandon actions, showing town name and whether it is connected elsewhere. A create conflict also returns that choice. Abandonment waits for acknowledgement, retaining the town and showing retryable errors if it fails. An unexpected drop shows Reconnect and explicit abandonment options. A successful reconnect preserves the same player/game/town. A terminal `game_ended` notification disables reconnect and offers new-game setup. Unclaimed halls stay physical; a distinct unoccupied art treatment is deliberately deferred.
 
+An elapsed grace period now returns a `grace_expired` entry dialog rather than silently falling through to setup. It names the old town, explains the timeout, and persists acknowledgement once per expired game. The future surviving-town vacancy contract is described in [EXPIRY_ENTRY.md](EXPIRY_ENTRY.md); actual joining awaits independent town membership.
+
 ## Deployment and checks
 
 Rebuild/restart **conductor, gateway, and all cell servers together**. The old 45-second terminal lease policy and fresh-game-only client are superseded. No new .env keys are required. The migration runs automatically with the existing DATABASE_URL.

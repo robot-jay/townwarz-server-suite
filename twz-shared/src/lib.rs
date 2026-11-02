@@ -65,6 +65,10 @@ pub enum GameEntry {
         id_token: String,
         player_id: ClientId,
     },
+    AcknowledgeExpiry {
+        id_token: String,
+        player_id: ClientId,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,6 +173,93 @@ pub struct GameLookupResponse {
     pub ok: bool,
     pub error: Option<String>,
     pub game: Option<ExistingGameSummary>,
+    #[serde(default)]
+    pub expired_game: Option<ExpiredGameNotice>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AcknowledgeExpiryRequest {
+    pub user: GameUser,
+    pub player_id: ClientId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpiredGameNotice {
+    pub player_id: ClientId,
+    pub town_id: String,
+    pub town_name: String,
+    pub expired_at_ms: i64,
+    pub grace_period_seconds: u64,
+    pub former_town: TownRejoinAvailability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleJoinUnavailableReason {
+    TownInactive,
+    RoleFull,
+    RejoiningUnavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TownRoleVacancy {
+    pub role: PlayerRole,
+    pub capacity: u32,
+    pub occupied: u32,
+    pub vacancies: u32,
+    pub can_join: bool,
+    pub unavailable_reason: Option<RoleJoinUnavailableReason>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejoinStatePolicy {
+    Fresh,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TownRejoinAvailability {
+    pub is_active: bool,
+    pub rejoin_supported: bool,
+    pub state_on_join: RejoinStatePolicy,
+    pub roles: Vec<TownRoleVacancy>,
+}
+
+impl TownRejoinAvailability {
+    /// Membership/joining is not implemented yet. Vacancies describe the future
+    /// roster contract but never advertise an action the server cannot perform.
+    pub fn pending_membership(is_active: bool, mayors: u32, commandos: u32) -> Self {
+        let roles = [
+            (PlayerRole::Mayor, 1u32, mayors),
+            (PlayerRole::Commando, 4u32, commandos),
+        ]
+        .into_iter()
+        .map(|(role, capacity, occupied)| {
+            let vacancies = capacity.saturating_sub(occupied);
+            let reason = if !is_active {
+                RoleJoinUnavailableReason::TownInactive
+            } else if vacancies == 0 {
+                RoleJoinUnavailableReason::RoleFull
+            } else {
+                RoleJoinUnavailableReason::RejoiningUnavailable
+            };
+            TownRoleVacancy {
+                role,
+                capacity,
+                occupied,
+                vacancies,
+                can_join: false,
+                unavailable_reason: Some(reason),
+            }
+        })
+        .collect();
+        Self {
+            is_active,
+            rejoin_supported: false,
+            state_on_join: RejoinStatePolicy::Fresh,
+            roles,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +298,7 @@ pub struct GameEnded {
 pub const RECONNECT_GRACE_SECONDS: u64 = 15 * 60;
 pub const SUBJ_GAME_RESUME: &str = "twz.game.resume";
 pub const SUBJ_GAME_CHECK: &str = "twz.game.check";
+pub const SUBJ_EXPIRY_ACK: &str = "twz.game.expiry.ack";
 pub const SUBJ_GAME_DISCONNECT: &str = "twz.game.disconnect";
 pub const SUBJ_GAME_QUIT_USER: &str = "twz.game.quit_user";
 pub const SUBJ_GAME_ENDED: &str = "twz.game.ended";
@@ -324,6 +416,33 @@ impl PlayerState {
 #[cfg(test)]
 mod town_tests {
     use super::*;
+
+    #[test]
+    fn former_town_contract_has_explicit_capacity_and_no_unsupported_join_actions() {
+        let active = TownRejoinAvailability::pending_membership(true, 1, 3);
+        assert!(!active.rejoin_supported);
+        assert_eq!(active.roles[0].capacity, 1);
+        assert_eq!(active.roles[0].vacancies, 0);
+        assert_eq!(
+            active.roles[0].unavailable_reason,
+            Some(RoleJoinUnavailableReason::RoleFull)
+        );
+        assert_eq!(active.roles[1].capacity, 4);
+        assert_eq!(active.roles[1].vacancies, 1);
+        assert!(active.roles.iter().all(|role| !role.can_join));
+        let mayor_vacant = TownRejoinAvailability::pending_membership(true, 0, 4);
+        assert_eq!(mayor_vacant.roles[0].vacancies, 1);
+        assert_eq!(mayor_vacant.roles[1].vacancies, 0);
+        assert_eq!(
+            mayor_vacant.roles[1].unavailable_reason,
+            Some(RoleJoinUnavailableReason::RoleFull)
+        );
+        let inactive = TownRejoinAvailability::pending_membership(false, 0, 0);
+        assert!(inactive
+            .roles
+            .iter()
+            .all(|role| role.unavailable_reason == Some(RoleJoinUnavailableReason::TownInactive)));
+    }
 
     #[test]
     fn town_names_are_trimmed_and_validated() {

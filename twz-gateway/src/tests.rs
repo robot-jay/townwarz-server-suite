@@ -341,6 +341,52 @@ async fn authenticated_entry_live_cells_geometry_resume_and_terminal_end() -> Re
     assert_eq!(promotion["former_mayor_id"], fresh_state["me"]);
     let mut unavailable = enter(&url, &tokens["valid"], None).await?;
     value_for(&mut unavailable, "no_game").await?;
+    let mut timed_out = enter(&url, &tokens["valid"], Some("Integration Timeout")).await?;
+    let timed_out_state = value_for(&mut timed_out, "state").await?;
+    let timed_out_id = timed_out_state["me"].as_str().unwrap();
+    play::operation(
+        &nats,
+        SUBJ_GAME_END,
+        &EndGameRequest {
+            player_id: timed_out_id.parse()?,
+            connection_id: None,
+            reason: GameEndReason::Timeout,
+        },
+    )
+    .await?;
+    value_for(&mut timed_out, "game_ended").await?;
+    let (mut expiry_menu, _) = connect_async(&url).await?;
+    expiry_menu
+        .send(TMsg::Text(
+            serde_json::json!({"type":"check_game","id_token":tokens["valid"]}).to_string(),
+        ))
+        .await?;
+    let expiry = value_for(&mut expiry_menu, "grace_expired").await?;
+    assert_eq!(expiry["notice"]["player_id"], timed_out_id);
+    assert_eq!(expiry["notice"]["town_name"], "Integration Timeout");
+    assert_eq!(expiry["notice"]["grace_period_seconds"], 900);
+    assert_eq!(expiry["notice"]["former_town"]["is_active"], false);
+    assert_eq!(expiry["notice"]["former_town"]["rejoin_supported"], false);
+    let mut expired_resume = enter(&url, &tokens["valid"], None).await?;
+    value_for(&mut expired_resume, "grace_expired").await?;
+    let (mut ack, _) = connect_async(&url).await?;
+    ack.send(TMsg::Text(serde_json::json!({"type":"acknowledge_expiry","id_token":tokens["valid"],"player_id":timed_out_id}).to_string())).await?;
+    value_for(&mut ack, "expiry_notice_ack").await?;
+    let (mut checked_again, _) = connect_async(&url).await?;
+    checked_again
+        .send(TMsg::Text(
+            serde_json::json!({"type":"check_game","id_token":tokens["valid"]}).to_string(),
+        ))
+        .await?;
+    value_for(&mut checked_again, "no_game").await?;
+    let mut after_expiry = enter(&url, &tokens["valid"], Some("After Expiry")).await?;
+    let new_participation = value_for(&mut after_expiry, "state").await?;
+    assert_ne!(new_participation["me"], timed_out_id);
+    assert_eq!(new_participation["self_state"]["wallet"]["cash"], 0);
+    after_expiry
+        .send(TMsg::Text("{\"type\":\"quit_game\"}".into()))
+        .await?;
+    value_for(&mut after_expiry, "game_quit_ack").await?;
     gateway_task.abort();
     Ok(())
 }

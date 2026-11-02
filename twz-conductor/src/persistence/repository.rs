@@ -9,8 +9,8 @@ use sea_orm::{
     Statement, TransactionTrait, Value,
 };
 use twz_shared::{
-    hall_for_slot, ClientId, EndGameRequest, ExistingGameSummary, GameConnection, GameUser,
-    PlayerState, Town, RECONNECT_GRACE_SECONDS,
+    hall_for_slot, ClientId, EndGameRequest, ExistingGameSummary, ExpiredGameNotice,
+    GameConnection, GameUser, PlayerState, Town, TownRejoinAvailability, RECONNECT_GRACE_SECONDS,
 };
 
 use super::entities::{games, users};
@@ -29,6 +29,16 @@ struct GameSummaryRow {
     town_name: String,
     connection_id: Option<String>,
     disconnected_at: Option<DateTimeWithTimeZone>,
+}
+
+#[derive(FromQueryResult)]
+struct GameHistoryRow {
+    player_id: String,
+    town_id: String,
+    town_name: String,
+    ended_at: Option<DateTimeWithTimeZone>,
+    end_reason: Option<String>,
+    expiry_notice_ack_at: Option<DateTimeWithTimeZone>,
 }
 
 #[derive(Debug)]
@@ -91,6 +101,9 @@ impl GameRepository {
             .await?;
         migration
             .execute_unprepared(include_str!("../../migrations/002_reconnect.sql"))
+            .await?;
+        migration
+            .execute_unprepared(include_str!("../../migrations/003_expiry_notice.sql"))
             .await?;
         migration.commit().await?;
         Ok(Self { db })
@@ -274,6 +287,83 @@ impl GameRepository {
             .into_iter()
             .map(|id| Ok(id.parse()?))
             .collect()
+    }
+
+    /// Only the latest participation can generate a return notice. Older
+    /// timeouts must not reappear after a later quit, defeat or new game.
+    pub async fn expired_game_notice(&self, subject: &str) -> Result<Option<ExpiredGameNotice>> {
+        let row = games::Entity::find()
+            .select_only()
+            .columns([
+                games::Column::PlayerId,
+                games::Column::TownId,
+                games::Column::TownName,
+                games::Column::EndedAt,
+                games::Column::EndReason,
+                games::Column::ExpiryNoticeAckAt,
+            ])
+            .filter(games::Column::Auth0Sub.eq(subject))
+            .order_by_desc(games::Column::StartedAt)
+            .order_by_desc(games::Column::PlayerId)
+            .into_model::<GameHistoryRow>()
+            .one(&self.db)
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.end_reason.as_deref() != Some("timeout") || row.expiry_notice_ack_at.is_some() {
+            return Ok(None);
+        }
+        let Some(ended) = row.ended_at else {
+            return Ok(None);
+        };
+        // Original town identity, never the hall_slot: a different town that
+        // reuses the same physical site is not the player's surviving town.
+        // Replace this projection with independent town/roster records when
+        // membership and succession are implemented.
+        let roster = games::Entity::find()
+            .select_only()
+            .column(games::Column::Role)
+            .filter(games::Column::TownId.eq(&row.town_id))
+            .filter(games::Column::EndedAt.is_null())
+            .into_tuple::<String>()
+            .all(&self.db)
+            .await?;
+        let former_town = TownRejoinAvailability::pending_membership(
+            !roster.is_empty(),
+            roster
+                .iter()
+                .filter(|role| role.as_str() == "mayor")
+                .count() as u32,
+            roster
+                .iter()
+                .filter(|role| role.as_str() == "commando")
+                .count() as u32,
+        );
+        Ok(Some(ExpiredGameNotice {
+            player_id: row.player_id.parse()?,
+            town_id: row.town_id,
+            town_name: row.town_name,
+            expired_at_ms: ended.timestamp_millis(),
+            grace_period_seconds: RECONNECT_GRACE_SECONDS,
+            former_town,
+        }))
+    }
+
+    pub async fn acknowledge_expiry(&self, subject: &str, player_id: ClientId) -> Result<()> {
+        games::Entity::update_many()
+            .col_expr(
+                games::Column::ExpiryNoticeAckAt,
+                Expr::current_timestamp().into(),
+            )
+            .filter(games::Column::Auth0Sub.eq(subject))
+            .filter(games::Column::PlayerId.eq(player_id.to_string()))
+            .filter(games::Column::EndedAt.is_not_null())
+            .filter(games::Column::EndReason.eq("timeout"))
+            .filter(games::Column::ExpiryNoticeAckAt.is_null())
+            .exec(&self.db)
+            .await?;
+        Ok(())
     }
 
     pub async fn update_connection(
