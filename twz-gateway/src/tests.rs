@@ -104,6 +104,9 @@ async fn authenticated_entry_verifies_user_creates_named_town_and_ends_on_discon
     assert_eq!(identity["town"]["name"], "Copper Creek");
     let pid = town_service.await?;
     assert_eq!(identity["id"], pid.to_string());
+    assert_eq!(identity["identity"]["game_id"], pid.to_string());
+    assert_eq!(identity["identity"]["town_id"], "test-town");
+    assert_eq!(identity["identity"]["role"], "mayor");
     drop(client);
     timeout(TEST_TIMEOUT, &mut backend.disconnected).await??;
     loop {
@@ -238,9 +241,30 @@ async fn browser_close_disconnects_backend_and_finishes_relay() {
     let mut gateway = gateway(backend.url.clone(), String::new()).await;
     let mut client = connect(&gateway.url).await;
     assert_eq!(timeout(TEST_TIMEOUT, &mut backend.connected).await.unwrap().unwrap(), "00000000-0000-0000-0000-000000000001");
+    let identity = timeout(TEST_TIMEOUT, &mut backend.identity).await.unwrap().unwrap();
+    assert_eq!(identity["identity"]["game_id"], "00000000-0000-0000-0000-000000000001");
+    assert!(identity["identity"]["town_id"].is_null());
+    assert!(identity["identity"]["role"].is_null());
     client.close(None).await.unwrap();
     timeout(TEST_TIMEOUT, &mut backend.disconnected).await.unwrap().unwrap();
     timeout(TEST_TIMEOUT, &mut gateway.finished).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn catalog_endpoint_exposes_versioned_readonly_definitions() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/catalog", listener.local_addr()?);
+    let app = Router::new().route("/catalog", get(catalog_handler));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let catalog: serde_json::Value = http.get(&url).send().await?.error_for_status()?.json().await?;
+    assert_eq!(catalog["version"], twz_shared::DOMAIN_VERSION);
+    assert_eq!(catalog["buildings"].as_array().unwrap().len(), 28);
+    assert_eq!(catalog["items"].as_array().unwrap().len(), 13);
+    assert_eq!(catalog["item_buildings"].as_array().unwrap().len(), 4);
+    assert_eq!(http.post(&url).send().await?.status(), axum::http::StatusCode::METHOD_NOT_ALLOWED);
+    server.abort();
+    Ok(())
 }
 
 #[tokio::test]

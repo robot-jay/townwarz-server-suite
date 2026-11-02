@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod domain;
+pub use domain::*;
+
 pub type ClientId = Uuid;
 
 pub type CellKey = (i32, i32);
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IVec2 { pub x:i32, pub y:i32 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +53,11 @@ pub struct GameSession { pub player_id: ClientId }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendHello {
-    SetPid { id: ClientId, #[serde(default)] town: Option<Town> },
+    SetPid {
+        id: ClientId,
+        #[serde(default)] town: Option<Town>,
+        #[serde(default)] identity: Option<GameIdentity>,
+    },
 }
 
 pub const TILE_PX: f32 = 48.0;
@@ -159,7 +166,7 @@ pub struct RouteCellResponse {
     pub owner_server_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PlayerState {
     pub id: ClientId,
     pub x: f32,
@@ -170,7 +177,8 @@ pub struct PlayerState {
     pub hp: i32,
     pub max_hp: i32,
     pub respawn_at: Option<u64>,
-    pub team: u8,
+    pub game: PlayerGameState,
+    pub damage_contributions: Vec<DamageContribution>,
     #[serde(default)]
     pub spawn_tile: Option<IVec2>,
 }

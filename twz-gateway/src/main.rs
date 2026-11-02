@@ -14,6 +14,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::Message as TMsg, MaybeTlsStream, WebSocketStream};
 use twz_shared::{RouteCellResponse, BackendHello, Town, GameEntry, CreateTownRequest, CreateTownResponse, GameSession, validate_town_name, SUBJ_TOWN_CREATE, SUBJ_GAME_END, SUBJ_GAME_TOUCH};
+use twz_shared::{GameIdentity, game_catalog};
 
 mod auth;
 
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
         .route("/play", get(play_handler))
+        .route("/catalog", get(catalog_handler))
         .with_state(state.clone());
 
     let addr: SocketAddr = args.bind.parse().unwrap();
@@ -72,6 +74,10 @@ async fn main() -> Result<()> {
 
 async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |client_ws| client_session(state, client_ws))
+}
+
+async fn catalog_handler() -> axum::Json<twz_shared::GameCatalog> {
+    axum::Json(game_catalog())
 }
 
 async fn play_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -187,6 +193,10 @@ async fn relay_session<F, Fut>(
 {
     let set_pid = TMsg::Text(serde_json::to_string(&BackendHello::SetPid {
         id: uuid::Uuid::parse_str(pid).expect("gateway-generated player id"), town: town.cloned(),
+        identity: Some(match town {
+            Some(town) => GameIdentity::mayor(uuid::Uuid::parse_str(pid).unwrap(), town.id.clone()),
+            None => GameIdentity::debug(uuid::Uuid::parse_str(pid).unwrap()),
+        }),
     }).unwrap());
     if !matches!(tokio::time::timeout(IO_TIMEOUT, backend.send(set_pid.clone())).await, Ok(Ok(()))) {
         return;
