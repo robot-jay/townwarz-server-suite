@@ -1,0 +1,83 @@
+name: Server CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
+jobs:
+  workspace:
+    name: Rust formatting, compile check and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: workspace
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check workspace
+        run: cargo check --workspace --locked
+      - name: Run workspace tests and doctests
+        run: cargo test --workspace --locked
+
+  integration:
+    name: PostgreSQL, NATS and live two-cell tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:14.9
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-test-password
+          POSTGRES_DB: townwarz_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d townwarz_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      nats:
+        image: nats:2.10-alpine
+        ports:
+          - 4222:4222
+    env:
+      DATABASE_URL: postgres://postgres:ci-test-password@127.0.0.1:5432/townwarz_ci
+      TEST_DATABASE_URL: postgres://postgres:ci-test-password@127.0.0.1:5432/townwarz_ci
+      TEST_NATS_URL: nats://127.0.0.1:4222
+      TEST_CONDUCTOR_URL: http://127.0.0.1:7000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: integration
+      - name: Build live services
+        run: cargo build --locked -p twz-conductor -p twz-cellserver
+      - name: Run all service-backed tests
+        run: bash .github/scripts/integration.sh
+      - name: Upload service logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-service-logs
+          path: target/ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
