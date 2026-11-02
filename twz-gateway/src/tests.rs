@@ -285,9 +285,9 @@ async fn authenticated_entry_live_cells_geometry_resume_and_terminal_end() -> Re
         .iter()
         .find(|b| b["ownership"]["game_id"] == fresh_state["me"])
         .unwrap();
-    assert_eq!(
+    assert_ne!(
         new_hall["id"], hall["id"],
-        "physical hall is reused, not duplicated"
+        "a fresh game gets a different hall from the account's previous game"
     );
     // Inspecting an active game must not try to claim its connection or open a
     // second backend session. The menu can then abandon it without resuming.

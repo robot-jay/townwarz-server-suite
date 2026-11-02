@@ -31,7 +31,7 @@ The repository owns a SQLx connection pool (minimum 1, maximum 10, eight-second 
 These operations intentionally remain explicit and atomic:
 
 - Transaction-scoped advisory lock `7489221` serializes allocation/resume/expiry across connections and processes.
-- Hall allocation and prior per-site claim timestamp lookup execute under that lock, with the existing active-hall unique index as a backstop.
+- Hall allocation and prior per-site claim timestamp lookup execute under that lock, with the existing active-hall unique index as a backstop. Fresh games randomly choose an available site from an initial 16-hall (4x4) pool. The pool grows to at least live/reserved claim count plus two, ensuring alternatives remain available. An account's most recent hall is excluded for a fresh game; reconnects retain their original assignment. Unexpired disconnect reservations remain excluded.
 - Resume selects its complete record `FOR UPDATE`, checks the old token, updates it, and builds its admission from that locked row. It does not reread the record after commit.
 - Heartbeat/disconnect update only a row with the matching live connection token. Missing checkpoints preserve the stored checkpoint via `COALESCE`.
 - Terminal updates use `UPDATE ... RETURNING`, so repeated/stale requests return no affected town and do not generate a second lifecycle notification.
@@ -59,4 +59,4 @@ $env:TEST_DATABASE_URL = 'postgres://postgres:your-password@127.0.0.1:5432/townw
 cargo test --workspace postgres_ -- --ignored --nocapture
 ```
 
-Repository tests no longer require NATS. They cover profile upsert, existing-data preservation on reopening, checkpoint/inventory round trips, grace reservation, stale heartbeat/disconnect/quit rejection, idempotent end, claim reuse/order, timeout, history retention, and simultaneous hall/account/resume claims using independent pools. Fixtures are scoped to unique test users and cleaned up. The normal gateway live-cell integration still exercises the application service and NATS event path with PostgreSQL behind it.
+Repository tests no longer require NATS. They cover profile upsert, existing-data preservation on reopening, checkpoint/inventory round trips, grace reservation, stale heartbeat/disconnect/quit rejection, idempotent end, timeout, history retention, and simultaneous hall/account/resume claims using independent pools. Random-allocation checks cover avoiding immediate repeats, valid generated sites, per-site generation history, full-pool expansion and reserved-hall exclusion. Fixtures are scoped to unique test users and cleaned up. The normal gateway live-cell integration still exercises the application service and NATS event path with PostgreSQL behind it.

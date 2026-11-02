@@ -1,8 +1,11 @@
 use anyhow::Result;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QuerySelect, Set,
+};
 use twz_shared::*;
 
+use super::repository::INITIAL_HALL_POOL_SIZE;
 use super::{
     entities::{games, users},
     GameRepository,
@@ -172,8 +175,10 @@ async fn postgres_grace_resume_fencing_quit_orb_and_expiry() -> Result<()> {
     let second = repository
         .create_game(&user, ClientId::new_v4(), "New Town")
         .await?;
-    assert_eq!(second.town.hall.id, town.hall.id);
-    assert!(second.town.created_at_ms > town.created_at_ms);
+    assert_ne!(
+        second.town.hall.id, town.hall.id,
+        "fresh games avoid the account's previous hall"
+    );
     assert_eq!(second.player_state.game.wallet.cash, 0);
     assert!(second
         .player_state
@@ -284,5 +289,154 @@ async fn postgres_concurrent_claims_and_resumes_use_database_locks() -> Result<(
     assert!(!expired?.iter().any(|town| town.id == first.town.id));
     assert!(resumed?.is_some());
     cleanup(&left, &[&a.sub, &b.sub, &c.sub]).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated TEST_DATABASE_URL"]
+async fn postgres_randomized_halls_avoid_previous_claims_and_expand_when_full() -> Result<()> {
+    let _fixtures = FIXTURES.lock().await;
+    let repository = GameRepository::connect(&std::env::var("TEST_DATABASE_URL")?).await?;
+    let account = user();
+    let mut previous = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut base = None;
+    for _ in 0..8 {
+        let game = repository
+            .create_game(&account, ClientId::new_v4(), "Random Start")
+            .await?;
+        let row = games::Entity::find_by_id(game.town.mayor_player_id.to_string())
+            .one(&repository.db)
+            .await?
+            .unwrap();
+        assert!((0..INITIAL_HALL_POOL_SIZE).contains(&row.hall_slot));
+        assert_ne!(
+            previous,
+            Some(row.hall_slot),
+            "consecutive new games must not reuse the previous hall"
+        );
+        assert_eq!(game.town.hall.id, hall_for_slot(row.hall_slot).id);
+        previous = Some(row.hall_slot);
+        seen.insert(row.hall_slot);
+        repository
+            .end_game(&EndGameRequest {
+                player_id: game.town.mayor_player_id,
+                connection_id: Some(game.connection_id),
+                reason: GameEndReason::IntentionalQuit,
+            })
+            .await?;
+        base = games::Entity::find_by_id(game.town.mayor_player_id.to_string())
+            .one(&repository.db)
+            .await?;
+    }
+    // This is deterministic because immediate repeats are excluded; no flaky
+    // statistical claim about a small sample's frequency distribution is needed.
+    assert!(seen.len() >= 2);
+    let base = base.unwrap();
+
+    // Any randomly chosen initial site must respect that site's previous claim
+    // generation, even when its history is ahead of the current wall clock.
+    let future = base.town_json["created_at_ms"].as_i64().unwrap() + 60_000;
+    for slot in 0..INITIAL_HALL_POOL_SIZE {
+        let id = ClientId::new_v4();
+        let town = Town {
+            id: format!("t-{id}"),
+            name: "Historical Claim".into(),
+            hall: hall_for_slot(slot),
+            created_at_ms: future,
+            mayor_player_id: id,
+        };
+        let mut history = base.clone().into_active_model();
+        history.player_id = Set(id.to_string());
+        history.town_id = Set(town.id.clone());
+        history.town_name = Set(town.name.clone());
+        history.hall_slot = Set(slot);
+        history.town_json = Set(serde_json::to_value(&town)?);
+        history.checkpoint_json = Set(None);
+        history.insert(&repository.db).await?;
+    }
+    let game = repository
+        .create_game(&account, ClientId::new_v4(), "New Generation")
+        .await?;
+    assert!(game.town.created_at_ms > future);
+    repository
+        .end_game(&EndGameRequest {
+            player_id: game.town.mayor_player_id,
+            connection_id: Some(game.connection_id),
+            reason: GameEndReason::IntentionalQuit,
+        })
+        .await?;
+
+    // Fill the initial grid with distinct legitimate owners, including one
+    // disconnected reservation, and verify allocation expands rather than
+    // taking an occupied hall or reporting exhaustion.
+    let mut owners = Vec::new();
+    for slot in 0..INITIAL_HALL_POOL_SIZE {
+        let owner = user();
+        users::Entity::insert(users::ActiveModel {
+            auth0_sub: Set(owner.sub.clone()),
+            ..Default::default()
+        })
+        .exec(&repository.db)
+        .await?;
+        let id = ClientId::new_v4();
+        let town = Town {
+            id: format!("t-{id}"),
+            name: "Reserved Hall".into(),
+            hall: hall_for_slot(slot),
+            created_at_ms: future + 1,
+            mayor_player_id: id,
+        };
+        let mut occupied = base.clone().into_active_model();
+        occupied.player_id = Set(id.to_string());
+        occupied.auth0_sub = Set(owner.sub.clone());
+        occupied.town_id = Set(town.id.clone());
+        occupied.town_name = Set(town.name.clone());
+        occupied.hall_slot = Set(slot);
+        occupied.town_json = Set(serde_json::to_value(&town)?);
+        occupied.checkpoint_json = Set(Some(serde_json::to_value(PlayerState::initial_for_town(
+            &town,
+        ))?));
+        occupied.ended_at = Set(None);
+        occupied.end_reason = Set(None);
+        occupied.connection_id = Set(Some(ClientId::new_v4().to_string()));
+        occupied.insert(&repository.db).await?;
+        owners.push(owner);
+    }
+    let reserved = games::Entity::find()
+        .filter(games::Column::Auth0Sub.eq(&owners[0].sub))
+        .one(&repository.db)
+        .await?
+        .unwrap();
+    let reserved_id: ClientId = reserved.player_id.parse()?;
+    assert!(
+        repository
+            .update_connection(
+                &GameConnection {
+                    player_id: reserved_id,
+                    connection_id: reserved.connection_id.unwrap().parse()?,
+                    checkpoint: None
+                },
+                true
+            )
+            .await?
+    );
+    let newcomer = repository
+        .create_game(&account, ClientId::new_v4(), "Expanded Region")
+        .await?;
+    let allocated = games::Entity::find_by_id(newcomer.town.mayor_player_id.to_string())
+        .one(&repository.db)
+        .await?
+        .unwrap();
+    assert!((INITIAL_HALL_POOL_SIZE..INITIAL_HALL_POOL_SIZE + 2).contains(&allocated.hall_slot));
+    let resumed = repository.resume_game(&owners[0].sub).await?.unwrap();
+    assert_eq!(
+        resumed.town.hall.id,
+        hall_for_slot(0).id,
+        "resume retains the original reserved hall"
+    );
+    let mut subjects: Vec<&str> = owners.iter().map(|owner| owner.sub.as_str()).collect();
+    subjects.push(&account.sub);
+    cleanup(&repository, &subjects).await?;
     Ok(())
 }

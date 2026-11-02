@@ -18,6 +18,9 @@ use super::entities::{games, users};
 const ALLOCATION_LOCK: i64 = 7_489_221;
 const MIGRATION_LOCK: i64 = 7_489_220;
 const STALE_CONNECTION_SECONDS: i64 = 45;
+// Sixteen sites form a 4x4 hall grid across the initial 2x2 routing cells.
+// Allocation grows beyond this floor as live/reserved claims fill the region.
+pub(super) const INITIAL_HALL_POOL_SIZE: i32 = 16;
 
 #[derive(FromQueryResult)]
 struct GameSummaryRow {
@@ -128,7 +131,10 @@ impl GameRepository {
         .await?;
 
         let slot = transaction
-            .query_one(statement(include_str!("sql/allocate_hall.sql"), vec![]))
+            .query_one(statement(
+                include_str!("sql/allocate_hall.sql"),
+                vec![INITIAL_HALL_POOL_SIZE.into(), user.sub.clone().into()],
+            ))
             .await?
             .context("No townhall slot was available.")?
             .try_get::<i32>("", "hall_slot")?;

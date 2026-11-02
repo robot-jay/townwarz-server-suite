@@ -4,6 +4,7 @@
 
 - Townhalls occupy a **3x3 tile / 144x144 pixel** reserved footprint. The **144x96 pixel upper body** blocks movement and hostile projectiles. The bottom **144x48 pixel row is a walkable forecourt**, still reserved against construction overlap.
 - Every procedural hall site has a visible, physical neutral hall, materialized lazily with terrain chunks. Claiming changes ownership/name, not its stable entity identity. Ending a town returns its hall to neutral.
+- Fresh games choose a random free hall from an initial 4x4 grid of sites, expanding with live/reserved claims. The same account does not receive its most recent hall on its next fresh game. Resuming a game retains its original hall and checkpoint; active and grace-reserved halls cannot be reassigned.
 - Players collide with all buildings. A projectile skips buildings with the same non-null town ID; enemy and neutral bodies block it. Neutral does not mean a shared anonymous faction.
 - An **unexpected disconnect reserves the same game/town for 15 minutes**. Reconnecting with the same verified Auth0 subject restores that game, unless it has ended (including an Orb defeat).
 - Intentional Leave game or Sign out starts the mayor-departure path. Eventually that path must offer promotions to eligible successors until none remain. Currently no successor roles are playable, so its explicit no-successor outcome releases the hall immediately. This phase does not implement promotion selection/timers.
@@ -80,4 +81,4 @@ With an isolated running conductor/cells and TEST_CONDUCTOR_URL/TEST_NATS_URL:
 cargo test --workspace authenticated_entry_live_cells_geometry -- --ignored --nocapture
 ```
 
-This verifies real physical hall snapshots, movement followed by same-game reconnection, terminal Orb invalidation, stable hall reuse, and acknowledged intentional quit. Frontend `npm test` and `npm run build` cover geometry/state validation and bundling; browser smoke checks cover drawing dimensions, login probing, reconnect/quit/logout and terminal-game UI.
+This verifies real physical hall snapshots, movement followed by same-game reconnection, terminal Orb invalidation, a different hall for a fresh game, and acknowledged intentional quit/abandonment. Stable site identity and safe hall reuse are covered by building-store tests. Frontend `npm test` and `npm run build` cover geometry/state validation and bundling; browser smoke checks cover drawing dimensions, login probing, reconnect/quit/logout and terminal-game UI.
