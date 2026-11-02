@@ -1,0 +1,1 @@
+ALTER TABLE twz_games ADD COLUMN IF NOT EXISTS expiry_notice_ack_at TIMESTAMPTZ;

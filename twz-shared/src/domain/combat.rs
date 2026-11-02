@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use crate::ClientId;
 use super::{EntityId, GameId, TownId};
+use crate::ClientId;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Combatant {
@@ -18,7 +18,13 @@ impl Combatant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DamageSourceKind { Player, Turret, HomingMissile, Orb, Environment }
+pub enum DamageSourceKind {
+    Player,
+    Turret,
+    HomingMissile,
+    Orb,
+    Environment,
+}
 
 /// Capture at fire/deploy time. No lookup of a live shooter is required when
 /// the hit happens, so disconnect/handoff cannot alter allegiance or kill credit.
@@ -31,13 +37,20 @@ pub struct DamageAttribution {
 
 impl DamageAttribution {
     pub fn can_damage(&self, target: &Combatant) -> bool {
-        !self.beneficiary.as_ref().is_some_and(|owner| owner.is_friendly_to(target))
+        !self
+            .beneficiary
+            .as_ref()
+            .is_some_and(|owner| owner.is_friendly_to(target))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RewardTargetKind { Player, Building, ItemBuilding }
+pub enum RewardTargetKind {
+    Player,
+    Building,
+    ItemBuilding,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageContribution {
@@ -77,12 +90,18 @@ pub struct CashShare(u16);
 impl TryFrom<u16> for CashShare {
     type Error = &'static str;
     fn try_from(value: u16) -> Result<Self, Self::Error> {
-        if value <= 10_000 { Ok(Self(value)) } else { Err("cash share must be between 0 and 10000 basis points") }
+        if value <= 10_000 {
+            Ok(Self(value))
+        } else {
+            Err("cash share must be between 0 and 10000 basis points")
+        }
     }
 }
 
 impl From<CashShare> for u16 {
-    fn from(value: CashShare) -> Self { value.0 }
+    fn from(value: CashShare) -> Self {
+        value.0
+    }
 }
 
 impl CashShare {
@@ -99,7 +118,11 @@ mod tests {
     #[test]
     fn allegiance_is_by_town_and_anonymous_players_are_independent() {
         let id = Uuid::new_v4();
-        let a = Combatant { player_id: id, game_id: id, town_id: Some("a".into()) };
+        let a = Combatant {
+            player_id: id,
+            game_id: id,
+            town_id: Some("a".into()),
+        };
         let mut b = a.clone();
         b.player_id = Uuid::new_v4();
         b.game_id = Uuid::new_v4();
@@ -120,7 +143,10 @@ mod tests {
     fn reward_percentage_is_checked_and_rounds_down_without_overflow() {
         let share = CashShare::try_from(1250).unwrap();
         assert_eq!(share.amount(101), 12);
-        assert_eq!(CashShare::try_from(10_000).unwrap().amount(u64::MAX), u64::MAX);
+        assert_eq!(
+            CashShare::try_from(10_000).unwrap().amount(u64::MAX),
+            u64::MAX
+        );
         assert!(CashShare::try_from(10_001).is_err());
         assert!(serde_json::from_str::<CashShare>("10001").is_err());
         assert_eq!(RewardPolicy::default().team_member_share, None);

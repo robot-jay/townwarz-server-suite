@@ -1,5 +1,7 @@
 # Phase 1: gameplay domain and authoritative player state
 
+> Phase 2 supersedes this document's original fresh-game-only lifecycle and 90px short-body geometry. Current catalog version is 2, the forecourt is exactly 48px, and unexpected disconnects allow same-game reconnect for 15 minutes. See [PHASE2.md](PHASE2.md).
+
 ## Decisions
 
 - Cash belongs to individual player wallets, initially zero.

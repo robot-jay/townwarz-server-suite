@@ -1,6 +1,6 @@
-use std::{path::PathBuf, time::Duration};
 use anyhow::Result;
 use serde::Deserialize;
+use std::{path::PathBuf, time::Duration};
 
 #[derive(Deserialize, Clone)]
 pub struct ServiceCfg {
@@ -35,7 +35,11 @@ impl Supervisor {
     pub fn from_toml_file(backend: Backend, path: PathBuf, interval: Duration) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let cfg: ConductorCfg = toml::from_str(&text)?;
-        Ok(Self { backend, cfg, interval })
+        Ok(Self {
+            backend,
+            cfg,
+            interval,
+        })
     }
 
     pub async fn run(self) -> Result<()> {

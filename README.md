@@ -1,5 +1,11 @@
 # This is the server softwares for the Townwarz game.
 
+Persistence is implemented with SeaORM behind a repository boundary. See [PERSISTENCE.md](PERSISTENCE.md) for entities, transaction/locking guarantees, configuration and database tests.
+
+Returning after an expired grace period now displays a named, acknowledge-once explanation before normal new-game setup. See [EXPIRY_ENTRY.md](EXPIRY_ENTRY.md) for the expired-game entry flow and future 1-Mayor/4-Commando rejoin contract.
+
+See [PHASE2.md](PHASE2.md) for physical neutral/owned townhalls, exact 3x3/96px-body/48px-forecourt geometry, building occupancy/collision, and the **15-minute same-game reconnect lifecycle**. Intentional quitting uses a no-successor release until promotion candidates are implemented.
+
 See [PHASE1.md](PHASE1.md) for the versioned Buildings/Items/ItemBuildings domain model, player-owned wallets and six-slot inventory, town allegiance, reward/assist extension points, and handoff-state guarantees. The read-only catalog is available at gateway `GET /catalog`.
 
 ## New-game flow and local configuration
@@ -21,12 +27,13 @@ AUTH0_CLIENT_ID=your-client-id
 ```
 
 - Create the `townwarz` PostgreSQL database first. The local `affectionate_shtern` container's `townwarz` database was created during implementation; other databases were left alone.
-- The conductor requires `DATABASE_URL` and applies `twz-conductor/migrations/001_games.sql` automatically. This initial local implementation uses an unencrypted PostgreSQL connection (`NoTls`).
+- New games randomly choose among free generated halls, starting with a 16-site region and growing it as claims fill up. The account's previous hall is skipped for its next fresh game. Reconnects preserve their saved hall, and active/15-minute-reserved halls remain protected.
+- The conductor requires `DATABASE_URL`. Its SeaORM repository maps the existing tables and automatically applies the idempotent SQL files in `twz-conductor/migrations/`. PostgreSQL TLS settings follow the connection URL/SQLx defaults.
 - The gateway requires the two Auth0 values for `/play`. They must match the web client's `VITE_AUTH0_DOMAIN` and `VITE_AUTH0_CLIENT_ID`. Use the Auth0 hostname without `https://`. No client secret or additional Auth0 API audience is required. The SPA must use RS256 signing.
 - Run `cargo run` commands from the workspace root so dotenv finds `.env`. Environment variables take precedence over dotenv.
 - `twz_users` stores verified Auth0 identity/profile data; `twz_games` stores game role, town details, and start/end times. Town names are trimmed and validated server-side (2–32 Unicode characters; letters, numbers, spaces, apostrophes, hyphens). Names need not be unique.
-- Every connection is a **new game**. There is no resume endpoint, saved movement state, or automatic reconnect into a previous town. Normal death/respawn within a live connection still uses its own townhall.
-- Disconnecting ends the game and frees its hall while keeping history. Active halls have a database uniqueness constraint and allocation is transactionally serialized. Gateway leases expire after 45 seconds, checked every 10 seconds, so crashed gateways do not retain halls indefinitely. Browser inactivity/blackholed connections are detected after roughly 30–40 seconds without client frames.
+- Unexpected disconnects preserve the game/town for **15 minutes**. Authenticated `/play` `resume_game` entry restores its checkpoint, unless it has expired, been intentionally left, or ended (e.g. Orbed). `start_game` creates a new town only when no game remains reserved for that account. Normal combat death still respawns at its own hall.
+- Intentional Leave game or Sign out explicitly ends the current mayor game and releases the hall through today's no-successor outcome. Future eligible members must instead receive promotion offers. Game history is retained. Gateway leases become disconnected after 45 seconds without heartbeats, then follow the 15-minute grace policy rather than immediately ending the game. Checkpoints are stored every 10 seconds and at ordinary disconnect.
 - Cell servers refresh active town labels every two seconds; the newly created own-town label is also installed immediately at spawn. Ended towns disappear from snapshots on the next refresh.
 - `/ws` is retained for the anonymous `debug-client.html`; it uses the shared fallback spawn and does not create a persisted town. It is a development endpoint, not an authenticated game entry.
 
@@ -41,17 +48,16 @@ cargo check --workspace
 cargo test --workspace
 ```
 
-The PostgreSQL integration test is opt-in and uses a unique fixture user, cleaning up its own records afterwards. Point it at a development/test database and NATS instance:
+The PostgreSQL repository integration tests are opt-in and use unique fixture users, cleaning up their own records afterwards. Point them at an isolated development/test database; repository tests do not require NATS:
 
 ```powershell
 $env:TEST_DATABASE_URL = $env:DATABASE_URL
-$env:TEST_NATS_URL = 'nats://127.0.0.1:4222'
-cargo test -p twz-conductor postgres_allocates -- --ignored --nocapture
+cargo test --workspace postgres_ -- --ignored --nocapture
 ```
 
-The gateway entry integration test also uses `TEST_NATS_URL` and can be run with `cargo test -p twz-gateway authenticated_entry_verifies -- --ignored --nocapture`. It uses generated test signatures and a stub town/cell service; the Auth0 JWT validation tests run in the normal workspace suite without network access.
+The Auth0 JWT validation tests run in the normal workspace suite without network access. PostgreSQL tests cover grace/resume and concurrent claims across independent connection pools using TEST_DATABASE_URL.
 
-For the live-cell integration test, also set `TEST_CONDUCTOR_URL` to an isolated running conductor with registered cells backed by the test database. Run `cargo test -p twz-gateway authenticated_entry_live_cells -- --ignored --nocapture`. It verifies actual spawn coordinates, multiple town labels, distinct active halls, disconnect cleanup, and a fresh game on a released hall. To run just the stub-service test, use the filter `authenticated_entry_verifies`.
+For the live-cell integration test, also set `TEST_CONDUCTOR_URL` to an isolated running conductor with registered cells backed by the test database. Run `cargo test --workspace authenticated_entry_live_cells_geometry -- --ignored --nocapture`. It verifies actual hall geometry, resumed movement/state, Orb invalidation, randomized fresh-game assignment and acknowledged quit/abandonment. To run just the stub-service test on a separate isolated NATS instance, use the filter `authenticated_entry_verifies`.
 
 ## Here's an overview of how the architecture is supposed to work:
 - Many clients talk to the game gateway.

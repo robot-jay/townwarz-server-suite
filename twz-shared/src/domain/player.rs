@@ -1,10 +1,13 @@
-use serde::{Deserialize, Serialize};
-use crate::ClientId;
 use super::{Combatant, GameId, Inventory, TownId};
+use crate::ClientId;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlayerRole { Mayor, Commando }
+pub enum PlayerRole {
+    Mayor,
+    Commando,
+}
 
 /// Set by the gateway, never from gameplay input. The current one-player game
 /// uses its fresh player UUID as game_id; the fields remain distinct so future
@@ -19,28 +22,45 @@ pub struct GameIdentity {
 
 impl GameIdentity {
     pub fn mayor(game_id: GameId, town_id: TownId) -> Self {
-        Self { game_id, town_id: Some(town_id), role: Some(PlayerRole::Mayor) }
+        Self {
+            game_id,
+            town_id: Some(town_id),
+            role: Some(PlayerRole::Mayor),
+        }
     }
 
     pub fn debug(game_id: GameId) -> Self {
-        Self { game_id, town_id: None, role: None }
+        Self {
+            game_id,
+            town_id: None,
+            role: None,
+        }
     }
 
     pub fn combatant(&self, player_id: ClientId) -> Combatant {
-        Combatant { player_id, game_id: self.game_id, town_id: self.town_id.clone() }
+        Combatant {
+            player_id,
+            game_id: self.game_id,
+            town_id: self.town_id.clone(),
+        }
     }
 }
 
 /// Cash is whole units, owned by an individual player. Keep JSON values exact
 /// in the browser; all eventual spending/rewards must use checked operations.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Wallet { pub cash: u64 }
+pub struct Wallet {
+    pub cash: u64,
+}
 
 impl Wallet {
     pub const MAX_CASH: u64 = 9_007_199_254_740_991;
 
     pub fn credit(&mut self, amount: u64) -> Result<(), &'static str> {
-        let next = self.cash.checked_add(amount).filter(|value| *value <= Self::MAX_CASH)
+        let next = self
+            .cash
+            .checked_add(amount)
+            .filter(|value| *value <= Self::MAX_CASH)
             .ok_or("cash limit exceeded")?;
         self.cash = next;
         Ok(())
@@ -70,7 +90,12 @@ pub struct PlayerGameState {
 
 impl PlayerGameState {
     pub fn new(identity: GameIdentity) -> Self {
-        Self { identity, wallet: Wallet::default(), inventory: Inventory::default(), cooldowns: PlayerCooldowns::default() }
+        Self {
+            identity,
+            wallet: Wallet::default(),
+            inventory: Inventory::default(),
+            cooldowns: PlayerCooldowns::default(),
+        }
     }
 
     pub fn on_combat_death(&mut self) {
