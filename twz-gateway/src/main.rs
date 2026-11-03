@@ -23,6 +23,7 @@ use twz_shared::{
 };
 
 mod auth;
+mod economy;
 mod play;
 
 #[derive(Parser, Debug)]
@@ -227,10 +228,32 @@ where
         quit: false,
         checkpoint: resume.cloned(),
     };
+    let mut economy = lease.as_ref().map(economy::SessionEconomy::new);
+    let mut income_tick = tokio::time::interval(Duration::from_millis(500));
+    let mut economic_cash = resume.map(|state| state.game.wallet.cash).unwrap_or(0);
 
     // Main relay loop
     loop {
         tokio::select! {
+            _ = income_tick.tick(), if economy.is_some() => {
+                if let Some(economy) = &economy { economy.request(None); }
+            }
+            response = async { economy.as_mut().unwrap().responses.recv().await }, if economy.is_some() => {
+                if let Some(response) = response {
+                    if let Some(projection) = response.projection {
+                        economic_cash = projection.cash;
+                        let message = serde_json::json!({"type":"economy_state", "cash":projection.cash,
+                            "territory":twz_shared::TownTerritory::for_town(&projection.town),
+                            "constructible_types":["wall_research","wall_factory"], "demolition_refund_percent":25});
+                        if c_sink.send(AxumMsg::Text(message.to_string())).await.is_err() { break; }
+                    }
+                    if let Some(result) = response.result {
+                        let message = serde_json::json!({"type":"construction_result", "result":result});
+                        if c_sink.send(AxumMsg::Text(message.to_string())).await.is_err() { break; }
+                    }
+                    if matches!(response.error, Some(twz_shared::ConstructionError::InactiveGame | twz_shared::ConstructionError::StaleConnection)) { break; }
+                } else { break; }
+            }
             // client -> backend
             message = c_stream.next() => {
                 let Some(Ok(message)) = message else { break; };
@@ -238,6 +261,20 @@ where
                 if let AxumMsg::Text(text)=&message {
                     if let Ok(value)=serde_json::from_str::<serde_json::Value>(text) {
                         if value["type"]=="pause_game" {continue;}
+                        if matches!(value["type"].as_str(), Some("place_building" | "demolish_building")) {
+                            let mut value = value;
+                            if let Some(object) = value.as_object_mut() { object.remove("v"); }
+                            let request_id = value.get("request_id").cloned().unwrap_or(serde_json::Value::Null);
+                            let command = serde_json::from_value::<twz_shared::ConstructionCommand>(value);
+                            let error = match command {
+                                Ok(command) => match &economy { Some(worker) if worker.request(Some(command.clone())) => None, Some(_) => Some(twz_shared::ConstructionError::Busy), None => Some(twz_shared::ConstructionError::InactiveGame) },
+                                Err(_) => Some(twz_shared::ConstructionError::InvalidCommand),
+                            };
+                            if let Some(error) = error {
+                                let _ = c_sink.send(AxumMsg::Text(serde_json::json!({"type":"construction_result","result":{"request_id":request_id,"error":error,"building_id":null,"cash":economic_cash,"refund":0}}).to_string())).await;
+                            }
+                            continue;
+                        }
                         if value["type"]=="quit_game" {
                             if let Some(lease)=&lease {
                                 let request=EndGameRequest {player_id:lease.connection.player_id,connection_id:Some(lease.connection.connection_id),reason:GameEndReason::IntentionalQuit};
@@ -315,6 +352,23 @@ where
         }
     }
 
+    // Capture eligible time at socket termination, before checkpoint/close IO.
+    if let (Some(worker), Some(lease)) = (&economy, &lease) {
+        let elapsed_ms = worker.elapsed_ms();
+        worker.stop();
+        if !outcome.quit {
+            let _ = economy::request_economy(
+                &lease.nats,
+                &twz_shared::EconomyRequest {
+                    player_id: lease.connection.player_id,
+                    connection_id: lease.connection.connection_id,
+                    elapsed_ms,
+                    command: None,
+                },
+            )
+            .await;
+        }
+    }
     if lease.is_some() && !outcome.quit {
         if matches!(
             tokio::time::timeout(

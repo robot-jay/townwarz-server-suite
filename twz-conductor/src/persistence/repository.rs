@@ -51,11 +51,15 @@ pub(crate) struct GameAdmission {
 impl GameAdmission {
     fn from_model(model: games::Model) -> Result<Self> {
         let town: Town = serde_json::from_value(model.town_json)?;
-        let player_state = model
+        let mut player_state: PlayerState = model
             .checkpoint_json
             .map(serde_json::from_value)
             .transpose()?
             .unwrap_or_else(|| PlayerState::initial_for_town(&town));
+        if let Some(economy) = model.economy_json {
+            player_state.game.wallet.cash =
+                serde_json::from_value::<twz_shared::EconomyState>(economy)?.cash;
+        }
         let connection_id = model
             .connection_id
             .context("Missing game connection token.")?
@@ -96,6 +100,7 @@ impl GameRepository {
         // several repository instances start against the same database.
         let migration = db.begin().await?;
         lock(&migration, MIGRATION_LOCK).await?;
+        lock(&migration, ALLOCATION_LOCK).await?;
         migration
             .execute_unprepared(include_str!("../../migrations/001_games.sql"))
             .await?;
@@ -104,6 +109,12 @@ impl GameRepository {
             .await?;
         migration
             .execute_unprepared(include_str!("../../migrations/003_expiry_notice.sql"))
+            .await?;
+        migration
+            .execute_unprepared(include_str!("../../migrations/004_economy.sql"))
+            .await?;
+        migration
+            .execute_unprepared(include_str!("../../migrations/005_participation_order.sql"))
             .await?;
         migration.commit().await?;
         Ok(Self { db })
@@ -235,7 +246,7 @@ impl GameRepository {
             .select_only()
             .column(games::Column::TownJson)
             .filter(games::Column::EndedAt.is_null())
-            .order_by_asc(games::Column::StartedAt)
+            .order_by_asc(games::Column::ParticipationOrder)
             .into_tuple::<serde_json::Value>()
             .all(&self.db)
             .await?
@@ -257,7 +268,7 @@ impl GameRepository {
             ])
             .filter(games::Column::Auth0Sub.eq(subject))
             .filter(games::Column::EndedAt.is_null())
-            .order_by_desc(games::Column::StartedAt)
+            .order_by_desc(games::Column::ParticipationOrder)
             .into_model::<GameSummaryRow>()
             .one(&self.db)
             .await?;
@@ -303,7 +314,7 @@ impl GameRepository {
                 games::Column::ExpiryNoticeAckAt,
             ])
             .filter(games::Column::Auth0Sub.eq(subject))
-            .order_by_desc(games::Column::StartedAt)
+            .order_by_desc(games::Column::ParticipationOrder)
             .order_by_desc(games::Column::PlayerId)
             .into_model::<GameHistoryRow>()
             .one(&self.db)

@@ -25,6 +25,8 @@ Before starting Vite, copy `twz-webclient/.env.example` to `twz-webclient/.env` 
 
 Persistence is implemented with SeaORM behind a repository boundary. See [PERSISTENCE.md](PERSISTENCE.md) for entities, transaction/locking guarantees, configuration and database tests.
 
+Phase 3b adds connected Mayor income, durable Wall Research/Factory purchases, 32×32-tile town territories, request replay protection, and 25% original-price demolition refunds. See [PHASE3B.md](PHASE3B.md) for protocol, recovery, and optional development income settings. React construction controls are the next Phase 3c task; [ROADMAP.md](ROADMAP.md) tracks the agreed milestones.
+
 Returning after an expired grace period now displays a named, acknowledge-once explanation before normal new-game setup. See [EXPIRY_ENTRY.md](EXPIRY_ENTRY.md) for the expired-game entry flow and future 1-Mayor/4-Commando rejoin contract.
 
 See [PHASE2.md](PHASE2.md) for physical neutral/owned townhalls, exact 3x3/96px-body/48px-forecourt geometry, building occupancy/collision, and the **15-minute same-game reconnect lifecycle**. Intentional quitting uses a no-successor release until promotion candidates are implemented.

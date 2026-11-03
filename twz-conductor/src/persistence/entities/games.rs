@@ -13,6 +13,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub town_json: Json,
     pub started_at: DateTimeWithTimeZone,
+    pub participation_order: i64,
     pub last_seen_at: DateTimeWithTimeZone,
     pub ended_at: Option<DateTimeWithTimeZone>,
     pub connection_id: Option<String>,
@@ -21,6 +22,8 @@ pub struct Model {
     pub checkpoint_json: Option<Json>,
     pub end_reason: Option<String>,
     pub expiry_notice_ack_at: Option<DateTimeWithTimeZone>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub economy_json: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -18,10 +18,10 @@ use std::{
 };
 use tokio::{net::TcpStream, sync::RwLock, time::sleep};
 use tracing_subscriber::EnvFilter;
-use url::Url;
 
 use twz_shared::{Heartbeat, RouteCellResponse, ServerRegister};
 
+mod economy;
 mod persistence;
 mod town_registry;
 use crate::town_registry::TownRegistry;
@@ -55,6 +55,8 @@ struct ServerInfo {
 #[derive(Default, Clone)]
 struct Registry {
     servers: HashMap<String, ServerInfo>, // key: server_id
+    owners: HashMap<twz_shared::CellKey, String>,
+    routing_ready: bool,
 }
 
 #[derive(Clone)]
@@ -163,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("Set DATABASE_URL in the server suite .env file"))?;
     let reg = TownRegistry::new(client.clone(), &database_url).await?;
-    reg.serve().await?;
+    reg.serve(state).await?;
 
     std::future::pending::<()>().await;
     Ok(())
@@ -219,52 +221,50 @@ async fn route_cell(State(state): State<AppState>, Path(id): Path<String>) -> im
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad_cell_y"}))),
     };
 
-    let reg = state.inner.read().await;
-    if reg.servers.is_empty() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error":"no_servers"})),
-        );
-    }
-
-    let mut ids: Vec<&String> = reg.servers.keys().collect();
-    ids.sort_unstable();
-
-    let mut hasher = DefaultHasher::new();
-    format!("{},{}", cx, cy).hash(&mut hasher);
-    let idx = (hasher.finish() as usize) % ids.len();
-    let owner_server_id = ids[idx].clone();
-
-    let resp = RouteCellResponse {
-        owner_server_id: owner_server_id.clone(),
-    };
-    (StatusCode::OK, Json(serde_json::to_value(resp).unwrap()))
+    route_response(&state, (cx, cy)).await
 }
 
 async fn route_cell_slash(
     State(state): State<AppState>,
     Path((cx, cy)): Path<(i32, i32)>,
 ) -> impl IntoResponse {
-    let reg = state.inner.read().await;
-    if reg.servers.is_empty() {
-        return (
+    route_response(&state, (cx, cy)).await
+}
+
+async fn route_response(
+    state: &AppState,
+    cell: twz_shared::CellKey,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match owner_for_cell(state, cell).await {
+        Some(owner_server_id) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(RouteCellResponse { owner_server_id }).unwrap()),
+        ),
+        None => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"no_servers"})),
-        );
+            Json(json!({"error":"authority_unavailable"})),
+        ),
     }
+}
 
-    let mut ids: Vec<&String> = reg.servers.keys().collect();
+async fn owner_for_cell(state: &AppState, cell: twz_shared::CellKey) -> Option<String> {
+    let mut reg = state.inner.write().await;
+    if !reg.routing_ready {
+        return None;
+    }
+    if let Some(owner) = reg.owners.get(&cell) {
+        return reg.servers.contains_key(owner).then(|| owner.clone());
+    }
+    let mut ids: Vec<_> = reg.servers.keys().cloned().collect();
     ids.sort_unstable();
-
-    let mut hasher = DefaultHasher::new();
-    format!("{},{}", cx, cy).hash(&mut hasher);
-    let idx = (hasher.finish() as usize) % ids.len();
-    let owner_server_id = ids[idx].clone();
-
-    let resp = RouteCellResponse {
-        owner_server_id: owner_server_id.clone(),
-    };
-    (StatusCode::OK, Json(serde_json::to_value(resp).unwrap()))
+    if ids.is_empty() {
+        return None;
+    }
+    let mut hash = DefaultHasher::new();
+    format!("{},{}", cell.0, cell.1).hash(&mut hash);
+    let owner = ids[hash.finish() as usize % ids.len()].clone();
+    reg.owners.insert(cell, owner.clone());
+    Some(owner)
 }
 
 async fn get_server(
@@ -288,4 +288,38 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis()
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    #[tokio::test]
+    async fn registrations_do_not_reassign_known_cells_and_missing_pinned_owners_fail_closed() {
+        let state = AppState::default();
+        state.inner.write().await.routing_ready = true;
+        let info = |id: &str| ServerInfo {
+            server_id: id.into(),
+            http_addr: String::new(),
+            ws_addr: String::new(),
+            capacity_hint: 1,
+            last_heartbeat_ms: 0,
+        };
+        state
+            .inner
+            .write()
+            .await
+            .servers
+            .insert("A".into(), info("A"));
+        assert_eq!(owner_for_cell(&state, (0, 0)).await.as_deref(), Some("A"));
+        state
+            .inner
+            .write()
+            .await
+            .servers
+            .insert("B".into(), info("B"));
+        assert_eq!(owner_for_cell(&state, (0, 0)).await.as_deref(), Some("A"));
+        state.inner.write().await.servers.remove("A");
+        assert!(owner_for_cell(&state, (0, 0)).await.is_none());
+        assert_eq!(owner_for_cell(&state, (1, 0)).await.as_deref(), Some("B"));
+    }
 }

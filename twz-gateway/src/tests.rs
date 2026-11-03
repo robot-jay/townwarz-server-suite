@@ -153,6 +153,33 @@ async fn authenticated_entry_verifies_user_creates_named_town_and_ends_on_discon
     assert_eq!(identity["identity"]["game_id"], pid.to_string());
     assert_eq!(identity["identity"]["town_id"], "test-town");
     assert_eq!(identity["identity"]["role"], "mayor");
+    // Simulate a coordinator/database error with no command outcome. The gateway
+    // must attach the original request ID rather than hanging a future UI.
+    let mut economy_errors = state.nats.subscribe(twz_shared::SUBJ_ECONOMY).await?;
+    state.nats.flush().await?;
+    let economy_nats = state.nats.clone();
+    let error_service = tokio::spawn(async move {
+        while let Some(message) = economy_errors.next().await {
+            if let Some(reply) = message.reply {
+                let _ = economy_nats
+                    .publish(
+                        reply,
+                        br#"{"error":"service_unavailable","result":null,"projection":null}"#
+                            .to_vec()
+                            .into(),
+                    )
+                    .await;
+            }
+        }
+    });
+    let request_id = uuid::Uuid::new_v4();
+    client.send(TMsg::Text(serde_json::json!({"type":"place_building","request_id":request_id,"building_type":"wall_research","origin_tile":{"x":13,"y":16}}).to_string())).await?;
+    let frame = timeout(TEST_TIMEOUT, client.next()).await?.unwrap()?;
+    let failure: serde_json::Value = serde_json::from_str(&frame.into_text()?)?;
+    assert_eq!(failure["type"], "construction_result");
+    assert_eq!(failure["result"]["request_id"], request_id.to_string());
+    assert_eq!(failure["result"]["error"], "service_unavailable");
+    error_service.abort();
     client
         .send(TMsg::Text("{\"type\":\"quit_game\"}".into()))
         .await?;
@@ -392,6 +419,143 @@ async fn authenticated_entry_live_cells_geometry_resume_and_terminal_end() -> Re
 }
 
 // Exercise the real relay over TCP/WebSockets, without requiring conductor or NATS.
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL conductor/cells, TEST_NATS_URL, TEST_CONDUCTOR_URL and accelerated Mayor income"]
+async fn authenticated_construction_live_durable_purchase_replay_demolition_and_resume(
+) -> Result<()> {
+    async fn frame(client: &mut BackendSocket, kind: &str) -> Result<serde_json::Value> {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let message = client
+                    .next()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("socket closed"))??;
+                if let TMsg::Text(text) = message {
+                    let value: serde_json::Value = serde_json::from_str(&text)?;
+                    if value["type"] == "game_error" {
+                        anyhow::bail!("{}", value["message"]);
+                    }
+                    if value["type"] == kind {
+                        return Ok(value);
+                    }
+                }
+            }
+        })
+        .await?
+    }
+    async fn command(
+        client: &mut BackendSocket,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        client.send(TMsg::Text(value.to_string())).await?;
+        Ok(frame(client, "construction_result").await?["result"].clone())
+    }
+    let nats = async_nats::connect(std::env::var("TEST_NATS_URL")?).await?;
+    let (auth, tokens) = auth::Auth0::fixture();
+    let state = AppState {
+        conductor: std::env::var("TEST_CONDUCTOR_URL")?,
+        http: reqwest::Client::new(),
+        nats,
+        auth: Some(auth),
+        switches: Arc::new(RwLock::new(HashMap::new())),
+    };
+    let app = Router::new()
+        .route("/play", get(play_handler))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("ws://{}/play", listener.local_addr()?);
+    let gateway_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut client, _) = connect_async(&url).await?;
+    client.send(TMsg::Text(serde_json::json!({"type":"start_game","role":"mayor","id_token":tokens["valid"],"town_name":"Construction Test"}).to_string())).await?;
+    let initial = frame(&mut client, "state").await?;
+    let id = initial["me"].clone();
+    let hall = initial["buildings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["ownership"]["game_id"] == id)
+        .unwrap();
+    let x = hall["origin_tile"]["x"].as_i64().unwrap();
+    let y = hall["origin_tile"]["y"].as_i64().unwrap();
+    assert_eq!(
+        initial["construction"]["territory"]["size_tiles"],
+        serde_json::json!({"x":32,"y":32})
+    );
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let value = frame(&mut client, "economy_state").await?;
+            if value["cash"].as_u64().unwrap() >= 55000 {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    let factory = serde_json::json!({"type":"place_building","request_id":uuid::Uuid::new_v4(),"building_type":"wall_factory","origin_tile":{"x":x,"y":y-3}});
+    assert_eq!(
+        command(&mut client, factory.clone()).await?["error"],
+        "missing_research"
+    );
+    let research = serde_json::json!({"type":"place_building","request_id":uuid::Uuid::new_v4(),"building_type":"wall_research","origin_tile":{"x":x-3,"y":y}});
+    let mut forged = research.clone();
+    forged["price"] = 0.into();
+    assert_eq!(
+        command(&mut client, forged).await?["error"],
+        "invalid_command"
+    );
+    let placed = command(&mut client, research.clone()).await?;
+    assert!(placed["error"].is_null(), "{placed}");
+    assert_eq!(
+        command(&mut client, research.clone()).await?["building_id"],
+        placed["building_id"]
+    );
+    let conflict = serde_json::json!({"type":"demolish_building","request_id":research["request_id"],"building_id":placed["building_id"]});
+    assert_eq!(
+        command(&mut client, conflict).await?["error"],
+        "request_id_conflict"
+    );
+    let mut occupied = research.clone();
+    occupied["request_id"] = uuid::Uuid::new_v4().to_string().into();
+    assert_eq!(command(&mut client, occupied).await?["error"], "occupied");
+    let mut factory = factory;
+    factory["request_id"] = uuid::Uuid::new_v4().to_string().into();
+    let built_factory = command(&mut client, factory).await?;
+    assert!(built_factory["error"].is_null(), "{built_factory}");
+    let demolition = serde_json::json!({"type":"demolish_building","request_id":uuid::Uuid::new_v4(),"building_id":placed["building_id"]});
+    let removed = command(&mut client, demolition.clone()).await?;
+    assert!(removed["error"].is_null(), "{removed}");
+    assert_eq!(removed["refund"], 1250);
+    assert_eq!(command(&mut client, demolition).await?, removed);
+    drop(client);
+    let (mut resumed, resumed_state) = timeout(Duration::from_secs(10), async {
+        loop {
+            let (mut attempt, _) = connect_async(&url).await?;
+            attempt
+                .send(TMsg::Text(
+                    serde_json::json!({"type":"resume_game","id_token":tokens["valid"]})
+                        .to_string(),
+                ))
+                .await?;
+            match frame(&mut attempt, "state").await {
+                Ok(value) => return Ok::<_, anyhow::Error>((attempt, value)),
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await??;
+    assert_eq!(resumed_state["me"], id);
+    let buildings = resumed_state["buildings"].as_array().unwrap();
+    assert!(!buildings.iter().any(|b| b["id"] == placed["building_id"]));
+    assert!(buildings
+        .iter()
+        .any(|b| b["id"] == built_factory["building_id"]));
+    resumed
+        .send(TMsg::Text("{\"type\":\"quit_game\"}".into()))
+        .await?;
+    frame(&mut resumed, "game_quit_ack").await?;
+    gateway_task.abort();
+    Ok(())
+}
+
 struct Gateway {
     url: String,
     switches: mpsc::UnboundedSender<String>,

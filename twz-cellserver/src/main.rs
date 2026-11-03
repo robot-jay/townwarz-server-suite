@@ -60,6 +60,7 @@ use tokio::{
 use uuid::Uuid;
 
 mod buildings;
+mod economy;
 use buildings::BuildingStore;
 
 #[derive(Parser, Debug)]
@@ -126,6 +127,8 @@ struct Player {
     last_cell: CellKey,
     #[serde(skip)]
     transferring: bool,
+    #[serde(skip)]
+    economy_pending: bool,
     max_hp: i32,
     respawn_at: Option<u64>,
     game: PlayerGameState,
@@ -171,6 +174,7 @@ impl Player {
             respawn_at: None,
             last_cell: cell_of(x, y, CELL_W),
             transferring: false,
+            economy_pending: false,
             transfer_target: None,
             transfer_started_at_ms: None,
             spawn_tile,
@@ -208,6 +212,7 @@ impl Player {
             respawn_at: player.respawn_at,
             last_cell: cell_of(player.x, player.y, CELL_W),
             transferring: false,
+            economy_pending: false,
             transfer_target: None,
             transfer_started_at_ms: None,
             game: player.game,
@@ -226,6 +231,7 @@ impl Player {
         if damage <= 0
             || self.hp <= 0
             || self.transferring
+            || self.economy_pending
             || !credit.can_damage(&self.game.identity.combatant(id))
         {
             return Vec::new();
@@ -299,6 +305,12 @@ struct World {
     ended_games: HashSet<ClientId>,
     #[serde(skip)]
     last_town_change: Option<Instant>,
+    #[serde(skip)]
+    pending_construction: HashMap<ClientId, economy::PendingConstruction>,
+    #[serde(skip)]
+    durable_buildings: HashMap<ClientId, HashSet<Uuid>>,
+    #[serde(skip)]
+    economy_revisions: HashMap<ClientId, u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -337,6 +349,14 @@ struct InputMsg {
 
 #[derive(Debug)]
 enum ControlMsg {
+    PrepareConstruction {
+        preparation: twz_shared::ConstructionPreparation,
+        reply: tokio::sync::oneshot::Sender<Option<twz_shared::ConstructionError>>,
+    },
+    ApplyEconomy {
+        projection: twz_shared::EconomyProjection,
+        requested_at: Option<Instant>,
+    },
     Spawn {
         id: ClientId,
         town: Option<Town>,
@@ -728,6 +748,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(town_refresh_task(state.clone()));
     tokio::spawn(spawn_command_task(state.clone()));
     tokio::spawn(game_end_task(state.clone()));
+    economy::serve(state.clone()).await?;
 
     {
         let mut w = state.world.write().await;
@@ -890,6 +911,9 @@ impl World {
     }
 
     fn end_game(&mut self, id: ClientId) {
+        self.pending_construction.remove(&id);
+        self.durable_buildings.remove(&id);
+        self.economy_revisions.remove(&id);
         self.ended_games.insert(id);
         self.last_town_change = Some(Instant::now());
         self.buildings.remove_game(id);
@@ -1432,6 +1456,16 @@ async fn game_loop(
 
                 while let Ok(ctrl) = ctrl_rx.try_recv() {
                     match ctrl {
+                        ControlMsg::PrepareConstruction { preparation, reply } => {
+                            let error = w.prepare_construction(preparation, &state.server_id).err();
+                            let _ = reply.send(error);
+                        }
+                        ControlMsg::ApplyEconomy {
+                            projection,
+                            requested_at,
+                        } => {
+                            w.apply_economy(projection, &state.server_id, requested_at);
+                        }
                         ControlMsg::Spawn {
                             id,
                             town,
@@ -1527,7 +1561,7 @@ async fn game_loop(
                     let prev_shoot = *w.last_shoot.get(&id).unwrap_or(&false);
 
                     if let Some(p) = w.players.get_mut(&id) {
-                        if p.transferring {
+                        if p.transferring || p.economy_pending {
                             continue;
                         }
                         let alive = p.hp > 0;
@@ -1585,7 +1619,7 @@ async fn game_loop(
                 for id in ids_for_collision {
                     let (combatant, mut nx, mut ny) = match w.players.get_mut(&id) {
                         Some(p) => {
-                            if p.hp <= 0 || p.transferring {
+                            if p.hp <= 0 || p.transferring || p.economy_pending {
                                 p.vx = 0.0;
                                 p.vy = 0.0;
                                 continue;
@@ -1711,7 +1745,7 @@ async fn game_loop(
                 }
 
                 for (pid, p) in w.players.iter_mut() {
-                    if p.hp <= 0 && !p.transferring {
+                    if p.hp <= 0 && !p.transferring && !p.economy_pending {
                         if let Some(t) = p.respawn_at {
                             if nowms >= t {
                                 let (sx, sy) = player_spawn_point(*pid, p.spawn_tile);
@@ -1736,7 +1770,7 @@ async fn game_loop(
                     let retry = p
                         .transfer_started_at_ms
                         .is_some_and(|started| nowms.saturating_sub(started) >= 5000);
-                    if ck != p.last_cell && (!p.transferring || retry) {
+                    if ck != p.last_cell && (!p.transferring || retry) && !p.economy_pending {
                         crossings.push((*id, ck, p.handoff_state(*id)));
                         p.transferring = true;
                         p.transfer_started_at_ms = Some(nowms);
@@ -1913,7 +1947,7 @@ async fn game_loop(
                 let (tiles_json, buildings_json) = {
                     let mut w = state.world.write().await;
                     let window = collect_tile_window(&mut w, ox, oy, VIEW_W, VIEW_H);
-                    let buildings = w.buildings.views(WorldRect {
+                    let buildings = w.visible_buildings(WorldRect {
                         x: ox as f32 * TILE_PX,
                         y: oy as f32 * TILE_PX,
                         width: VIEW_W as f32 * TILE_PX,
@@ -1926,7 +1960,7 @@ async fn game_loop(
                 };
 
                 let txt = format!(
-                    r#"{{"v":1,"type":"state","t":{},"me":"{}","players":{},"bullets":{},"tiles":{},"towns":{},"catalog_version":{},"self_state":{},"player_affiliations":{},"events":{},"buildings":{},"resume_state":{}}}"#,
+                    r#"{{"v":1,"type":"state","t":{},"me":"{}","players":{},"bullets":{},"tiles":{},"towns":{},"catalog_version":{},"self_state":{},"player_affiliations":{},"events":{},"buildings":{},"resume_state":{},"construction":{}}}"#,
                     tms,
                     id,
                     players_json,
@@ -1938,7 +1972,9 @@ async fn game_loop(
                     affiliations_json,
                     events_json,
                     buildings_json,
-                    serde_json::to_string(&resume_states[&id]).unwrap()
+                    serde_json::to_string(&resume_states[&id]).unwrap(),
+                    serde_json::to_string(&state.world.read().await.construction_status(id))
+                        .unwrap()
                 );
 
                 let _ = ch.send(Message::Text(txt));

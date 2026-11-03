@@ -37,10 +37,11 @@ else:
 PY
 
 # Mock NATS responders must finish before the real conductor subscribes to the
-# same subjects. This runs every ignored test except the live-service fixture.
+# same subjects. Live-service fixtures run after the real services are ready.
 cargo test --workspace --locked -- \
   --ignored --test-threads=1 \
-  --skip authenticated_entry_live_cells_geometry_resume_and_terminal_end
+  --skip authenticated_entry_live_cells_geometry_resume_and_terminal_end \
+  --skip authenticated_construction_live_durable_purchase_replay_demolition_and_resume
 
 wait_for_http() {
   local url="$1"
@@ -80,5 +81,6 @@ done
 # The fixture creates its own gateway with local Auth0 signing keys; no secrets
 # or real Auth0 tenant are needed. Both real cells and persistence are exercised.
 cargo test --workspace --locked \
-  authenticated_entry_live_cells_geometry_resume_and_terminal_end -- \
-  --ignored --test-threads=1 --nocapture
+  authenticated_ -- \
+  --ignored --test-threads=1 --nocapture \
+  --skip authenticated_entry_verifies_user_creates_named_town_and_ends_on_disconnect

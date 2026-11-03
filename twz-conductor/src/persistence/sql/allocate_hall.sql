@@ -19,7 +19,7 @@ WITH available AS (
 ), previous_assignment AS (
     SELECT hall_slot FROM twz_games
     WHERE auth0_sub = $2
-    ORDER BY started_at DESC, player_id DESC
+    ORDER BY participation_order DESC
     LIMIT 1
 )
 SELECT candidate::integer AS hall_slot
