@@ -1,4 +1,4 @@
-name: Server CI
+name: TownWarz CI
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: server-ci-${{ github.event.pull_request.number || github.ref }}
+  group: townwarz-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -17,6 +17,27 @@ env:
   RUST_BACKTRACE: '1'
 
 jobs:
+  client:
+    name: Client tests and production build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: twz-webclient
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: twz-webclient/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run all client tests
+        run: npm test
+      - name: Typecheck and build production client
+        run: npm run build
+
   workspace:
     name: Rust formatting, compile check and unit tests
     runs-on: ubuntu-24.04

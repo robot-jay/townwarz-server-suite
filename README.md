@@ -1,4 +1,27 @@
-# This is the server softwares for the Townwarz game.
+# TownWarz monorepo
+
+The Rust game services and React browser client live in this repository:
+
+| Directory | Purpose |
+| --- | --- |
+| `twz-conductor/` | Cell registration, routing, persistence and service supervision |
+| `twz-gateway/` | Authenticated browser WebSocket entry and relay |
+| `twz-cellserver/` | Authoritative game simulation |
+| `twz-shared/` | Shared Rust contracts and domain definitions |
+| `twz-webclient/` | React + TypeScript + Vite browser client |
+
+The browser client is an ordinary directory in this repository; no submodule initialization is needed. Cargo commands run from the repository root. npm commands run in `twz-webclient/`, or use `npm --prefix twz-webclient ...` from the root.
+
+## Browser client quick start
+
+Requires Node.js 20.19+ or 22.12+. From the repository root:
+
+```sh
+npm --prefix twz-webclient ci
+npm --prefix twz-webclient run dev
+```
+
+Before starting Vite, copy `twz-webclient/.env.example` to `twz-webclient/.env` and configure the public `VITE_AUTH0_*` values. The root `.env` configures Rust services; the client has its own `.env` in its directory. Open **http://localhost:5173**. The gateway defaults to **ws://localhost:8081/play**. See [the client README](twz-webclient/README.md) for Auth0 setup, controls and production hosting.
 
 Persistence is implemented with SeaORM behind a repository boundary. See [PERSISTENCE.md](PERSISTENCE.md) for entities, transaction/locking guarantees, configuration and database tests.
 
@@ -46,7 +69,12 @@ For a conductor container, supply `--env-file .env` (or explicit `-e DATABASE_UR
 ```sh
 cargo check --workspace
 cargo test --workspace
+cargo fmt --all -- --check
+npm --prefix twz-webclient test
+npm --prefix twz-webclient run build
 ```
+
+The root [GitHub Actions workflow](.github/workflows/ci.yml) runs client tests and production build, Rust formatting/compile/workspace tests, and isolated PostgreSQL/NATS/live two-cell integration tests on every PR update and every push to `master`. Client dependencies are installed from `twz-webclient/package-lock.json`. GitHub only discovers workflows in the repository-root `.github/workflows/` directory. No Auth0 secrets are required for CI.
 
 The PostgreSQL repository integration tests are opt-in and use unique fixture users, cleaning up their own records afterwards. Point them at an isolated development/test database; repository tests do not require NATS:
 
@@ -67,11 +95,12 @@ For the live-cell integration test, also set `TEST_CONDUCTOR_URL` to an isolated
 - All of the interprocess communication happens via a NATS server.
 
 ## To run the app, you need to start all the various processes in order. That order is:
-- Conductor
 - NATS server
+- Conductor
 - Cell server A
 - Cell server B
 - Gateway
+- Browser client (`npm --prefix twz-webclient run dev`)
 
 ## The current commands used for local dev are:
 ```Conductor

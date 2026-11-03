@@ -22,12 +22,11 @@
 Thumbs.db
 Desktop.ini
 
-# Node modules (in case you ever npm install in client)
-client/node_modules/
-
-# Build artifacts for client if using a bundler
-client/dist/
-client/build/
+# Web client dependencies and generated output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
 
 # Logs
 *.log

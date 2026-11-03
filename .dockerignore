@@ -1,5 +1,7 @@
 .git
 target
+# Rust service images do not use the browser client or its npm dependencies.
+twz-webclient
 nats-data
 .env
 .env.*

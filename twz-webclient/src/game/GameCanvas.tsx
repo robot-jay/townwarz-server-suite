@@ -1,0 +1,155 @@
+import { useEffect, useRef, type RefObject } from 'react';
+import { emptyInput, type Input, type Snapshot } from './protocol';
+
+const TILE = 48;
+const colors = ['#526847', '#315e72', '#747c78', '#cfb46c'];
+const bindings: Record<string, keyof Input> = {
+  KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down',
+  KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', Space: 'shoot',
+};
+
+export function GameCanvas({ snapshot, input }: {
+  snapshot: RefObject<Snapshot | null>; input: RefObject<Input>;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext('2d')!;
+    let width = 0, height = 0, frame = 0;
+    const held = new Set<string>();
+    let mouseDown = false;
+    const update = () => {
+      const next = emptyInput();
+      held.forEach(code => { if (bindings[code]) next[bindings[code]] = true; });
+      next.shoot ||= mouseDown;
+      input.current = next;
+    };
+    const release = () => { held.clear(); mouseDown = false; update(); };
+    const keydown = (e: KeyboardEvent) => {
+      if (!bindings[e.code] || document.activeElement !== canvas) return;
+      e.preventDefault(); held.add(e.code); update();
+    };
+    const keyup = (e: KeyboardEvent) => { held.delete(e.code); update(); };
+    const down = (e: PointerEvent) => {
+      canvas.focus();
+      if (e.button === 0) { mouseDown = true; update(); }
+    };
+    const up = () => { mouseDown = false; update(); };
+    const visibility = () => { if (document.hidden) release(); };
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      width = rect.width; height = rect.height;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(canvas);
+    resize();
+    window.addEventListener('keydown', keydown);
+    window.addEventListener('keyup', keyup);
+    window.addEventListener('blur', release);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    document.addEventListener('visibilitychange', visibility);
+    canvas.addEventListener('blur', release);
+    canvas.addEventListener('pointerdown', down);
+    canvas.focus();
+
+    const draw = () => {
+      ctx.fillStyle = '#19251f'; ctx.fillRect(0, 0, width, height);
+      const state = snapshot.current;
+      const me = state?.players.find(p => p[0] === state.me);
+      if (state && me) {
+        // Fit inside the server's fixed 26×18 terrain window on every screen.
+        const scale = Math.min(width / (24 * TILE), height / (16 * TILE));
+        const sx = (x: number) => width / 2 + (x - me[1]) * scale;
+        const sy = (y: number) => height / 2 + (y - me[2]) * scale;
+        const size = TILE * scale;
+        const tiles = state.tiles;
+        if (tiles) for (let j = 0; j < tiles.h; j++) for (let i = 0; i < tiles.w; i++) {
+          const tile = tiles.data[j * tiles.w + i];
+          const x = sx((tiles.ox + i) * TILE), y = sy((tiles.oy + j) * TILE);
+          ctx.fillStyle = colors[tile] || colors[0];
+          ctx.fillRect(x, y, size + 0.5, size + 0.5);
+          ctx.strokeStyle = '#0000000d'; ctx.strokeRect(x, y, size, size);
+          if (tile === 2) {
+            ctx.fillStyle = '#9aa29a'; ctx.fillRect(x + size * .18, y + size * .18, size * .6, size * .5);
+          } else if (tile === 3 && state.buildings === undefined) {
+            ctx.fillStyle = '#594b32'; ctx.fillRect(x + size * .18, y + size * .4, size * .64, size * .48);
+            ctx.fillStyle = '#f4db9e'; ctx.beginPath();
+            ctx.moveTo(x + size * .1, y + size * .45); ctx.lineTo(x + size * .5, y + size * .1);
+            ctx.lineTo(x + size * .9, y + size * .45); ctx.fill();
+            ctx.fillStyle = '#302e24'; ctx.fillRect(x + size * .43, y + size * .62, size * .18, size * .26);
+          }
+        }
+        for (const building of [...(state.buildings ?? [])].sort((a,b) => a.origin_tile.y-b.origin_tile.y)) {
+          const x = sx(building.origin_tile.x * TILE), y = sy(building.origin_tile.y * TILE);
+          const body = building.geometry.collision_px;
+          const footprint = building.geometry.footprint_tiles;
+          const w = footprint.x * size, h = footprint.y * size, bodyH = body.height * scale;
+          ctx.fillStyle = '#839076'; ctx.fillRect(x,y + bodyH,w,h - bodyH);
+          ctx.strokeStyle = '#263c3344'; ctx.lineWidth = 1;
+          for (let i = 0; i <= footprint.x; i++) {
+            ctx.beginPath(); ctx.moveTo(x + i * size,y + bodyH); ctx.lineTo(x + i * size,y + h); ctx.stroke();
+          }
+          ctx.fillStyle = '#594b32'; ctx.fillRect(x,y,w,bodyH);
+          ctx.fillStyle = '#c7af76'; ctx.fillRect(x + 4 * scale,y + bodyH * .3,w - 8 * scale,bodyH * .7);
+          ctx.fillStyle = '#f4db9e'; ctx.beginPath(); ctx.moveTo(x,y + bodyH * .4);
+          ctx.lineTo(x + w / 2,y); ctx.lineTo(x + w,y + bodyH * .4); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = '#302e24'; ctx.fillRect(x + w * .43,y + bodyH * .65,w * .14,bodyH * .35);
+          if (building.town_name) {
+            ctx.save(); ctx.font = '600 13px "DM Sans", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            const labelWidth = ctx.measureText(building.town_name).width + 20;
+            const labelX = x + w / 2, labelY = y - 16;
+            ctx.fillStyle = '#102017e8'; ctx.fillRect(labelX-labelWidth/2,labelY-13,labelWidth,26);
+            ctx.strokeStyle = building.ownership?.owner_player_id === state.me ? '#dfbb7888' : '#a1b58e66';
+            ctx.strokeRect(labelX-labelWidth/2,labelY-13,labelWidth,26);
+            ctx.fillStyle = '#f4db9e'; ctx.fillText(building.town_name,labelX,labelY); ctx.restore();
+          }
+        }
+        for (const town of state.buildings === undefined ? (state.towns ?? []) : []) {
+          const x = sx((town.hall.origin.x + .5) * TILE);
+          const y = sy(town.hall.origin.y * TILE) - 9;
+          if (x < -200 || x > width + 200 || y < -40 || y > height + 40) continue;
+          ctx.save();
+          ctx.font = '600 13px "DM Sans", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const labelWidth = ctx.measureText(town.name).width + 20;
+          ctx.fillStyle = '#102017e8';
+          ctx.fillRect(x - labelWidth / 2, y - 13, labelWidth, 26);
+          ctx.strokeStyle = town.mayor_player_id === state.me ? '#dfbb7888' : '#a1b58e66';
+          ctx.strokeRect(x - labelWidth / 2, y - 13, labelWidth, 26);
+          ctx.fillStyle = town.mayor_player_id === state.me ? '#f4db9e' : '#d3dfca';
+          ctx.fillText(town.name, x, y);
+          ctx.restore();
+        }
+        for (const [id, x, y, angle, hp] of state.players) {
+          ctx.save(); ctx.translate(sx(x), sy(y)); ctx.rotate(angle); ctx.scale(scale, scale);
+          ctx.globalAlpha = hp <= 0 ? .3 : 1;
+          ctx.shadowColor = '#0008'; ctx.shadowBlur = 8;
+          ctx.fillStyle = id === state.me ? '#f4e3ad' : '#c8e0de';
+          ctx.beginPath(); ctx.moveTo(19, 0); ctx.lineTo(-12, -12); ctx.lineTo(-7, 0); ctx.lineTo(-12, 12); ctx.closePath(); ctx.fill();
+          ctx.strokeStyle = '#25362c'; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+          if (id !== state.me && hp > 0) {
+            ctx.fillStyle = '#17231d'; ctx.fillRect(sx(x) - 16 * scale, sy(y) - 23 * scale, 32 * scale, 3 * scale);
+            ctx.fillStyle = '#a1c49c'; ctx.fillRect(sx(x) - 16 * scale, sy(y) - 23 * scale, 32 * scale * Math.max(0, hp) / 100, 3 * scale);
+          }
+        }
+        ctx.fillStyle = '#ffcc8a';
+        for (const b of state.bullets) { ctx.beginPath(); ctx.arc(sx(b.x), sy(b.y), Math.max(2, 3 * scale), 0, Math.PI * 2); ctx.fill(); }
+      }
+      frame = requestAnimationFrame(draw);
+    };
+    frame = requestAnimationFrame(draw);
+    return () => {
+      cancelAnimationFrame(frame); observer.disconnect(); release();
+      window.removeEventListener('keydown', keydown); window.removeEventListener('keyup', keyup);
+      window.removeEventListener('blur', release); window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up); document.removeEventListener('visibilitychange', visibility);
+      canvas.removeEventListener('blur', release); canvas.removeEventListener('pointerdown', down);
+    };
+  }, [snapshot, input]);
+  return <canvas ref={canvasRef} tabIndex={0} aria-label="TownWarz game world. W and S move, A and D turn, Space or left mouse fires. Click to focus." />;
+}
