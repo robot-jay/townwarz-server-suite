@@ -86,8 +86,12 @@ async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl
     ws.on_upgrade(move |client_ws| client_session(state, client_ws))
 }
 
-async fn catalog_handler() -> axum::Json<twz_shared::GameCatalog> {
-    axum::Json(game_catalog())
+async fn catalog_handler() -> impl IntoResponse {
+    // Public, read-only definitions are fetched by the SPA on a separate origin.
+    (
+        [(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        axum::Json(game_catalog()),
+    )
 }
 
 async fn play_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -242,14 +246,18 @@ where
                 if let Some(response) = response {
                     if let Some(projection) = response.projection {
                         economic_cash = projection.cash;
-                        let message = serde_json::json!({"type":"economy_state", "cash":projection.cash,
-                            "territory":twz_shared::TownTerritory::for_town(&projection.town),
-                            "constructible_types":["wall_research","wall_factory"], "demolition_refund_percent":25});
-                        if c_sink.send(AxumMsg::Text(message.to_string())).await.is_err() { break; }
+                        let message = twz_shared::ConstructionClientMessage::EconomyState {
+                            cash: projection.cash, revision: projection.revision, owned_buildings: projection.buildings,
+                            territory: twz_shared::TownTerritory::for_town(&projection.town),
+                            constructible_types: twz_shared::CONSTRUCTIBLE_BUILDINGS.to_vec(), demolition_refund_percent: 25,
+                        };
+                        if c_sink.send(AxumMsg::Text(serde_json::to_string(&message).unwrap())).await.is_err() { break; }
                     }
                     if let Some(result) = response.result {
-                        let message = serde_json::json!({"type":"construction_result", "result":result});
-                        if c_sink.send(AxumMsg::Text(message.to_string())).await.is_err() { break; }
+                        let message = twz_shared::ConstructionClientMessage::ConstructionResult {
+                            result, outcome_known: response.error != Some(twz_shared::ConstructionError::ServiceUnavailable),
+                        };
+                        if c_sink.send(AxumMsg::Text(serde_json::to_string(&message).unwrap())).await.is_err() { break; }
                     }
                     if matches!(response.error, Some(twz_shared::ConstructionError::InactiveGame | twz_shared::ConstructionError::StaleConnection)) { break; }
                 } else { break; }
@@ -271,7 +279,7 @@ where
                                 Err(_) => Some(twz_shared::ConstructionError::InvalidCommand),
                             };
                             if let Some(error) = error {
-                                let _ = c_sink.send(AxumMsg::Text(serde_json::json!({"type":"construction_result","result":{"request_id":request_id,"error":error,"building_id":null,"cash":economic_cash,"refund":0}}).to_string())).await;
+                                let _ = c_sink.send(AxumMsg::Text(serde_json::json!({"type":"construction_result","outcome_known":true,"result":{"request_id":request_id,"error":error,"building_id":null,"cash":economic_cash,"refund":0}}).to_string())).await;
                             }
                             continue;
                         }

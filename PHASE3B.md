@@ -1,5 +1,7 @@
 # Phase 3b — authoritative income and durable construction
 
+> Phase 3c's React controls are now implemented. See [PHASE3C.md](PHASE3C.md) for the UI and the additional provenance/known-outcome fields below.
+
 Phase 3a's rules are recorded in [ROADMAP.md](ROADMAP.md). This phase implements the server economy and command path. The React construction controls are Phase 3c; UI-level acceptance is Phase 3d. Manufacturing, pickups, inventory controls and Wall deployment remain Phase 4.
 
 ## Implemented rules
@@ -57,11 +59,11 @@ Optional `v` is accepted by the gateway. Extra command fields such as price, cas
 Replies:
 
 ```json
-{"type":"construction_result","result":{"request_id":"<UUID>","error":null,"building_id":"<UUID>","cash":50000,"refund":0}}
-{"type":"economy_state","cash":50000,"territory":{"min_tile":{"x":0,"y":0},"size_tiles":{"x":32,"y":32}},"constructible_types":["wall_research","wall_factory"],"demolition_refund_percent":25}
+{"type":"construction_result","outcome_known":true,"result":{"request_id":"<UUID>","error":null,"building_id":"<UUID>","cash":50000,"refund":0}}
+{"type":"economy_state","cash":50000,"revision":1,"owned_buildings":[],"territory":{"min_tile":{"x":0,"y":0},"size_tiles":{"x":32,"y":32}},"constructible_types":["wall_research","wall_factory"],"demolition_refund_percent":25}
 ```
 
-`error` is a structured snake_case rejection, for example `not_alive`, `outside_territory`, `missing_research`, `insufficient_cash`, `occupied`, `player_obstruction`, `not_owned`, `town_hall_protected`, `request_id_conflict`, `authority_unavailable`, `invalid_command`, or `service_unavailable`. A lost reply/service timeout has an uncertain outcome: retry with the **same request ID and payload**. An explicit recorded rejection is final for that ID; a new attempt after changing circumstances uses a new ID. Result cash is the historical balance at that request's outcome; `economy_state` and snapshots provide the latest balance.
+`error` is a structured snake_case rejection, for example `not_alive`, `outside_territory`, `missing_research`, `insufficient_cash`, `occupied`, `player_obstruction`, `not_owned`, `town_hall_protected`, `request_id_conflict`, `authority_unavailable`, `invalid_command`, or `service_unavailable`. A lost reply/service timeout has an uncertain outcome: retry with the **same request ID and payload**. Phase 3c adds `outcome_known` to distinguish such uncertainty from an explicit recorded rejection, which is final for that ID; a new attempt after changing circumstances uses a new ID. `owned_buildings` contains current town-wide purchased instances with their original `price_paid`, supporting prerequisites and refund estimates outside the visible snapshot. Result cash is historical; current `economy_state` supplies revisioned balances and provenance.
 
 Normal state snapshots include `construction: {territory, can_construct, reason}` and authoritative `self_state.wallet.cash`. `can_construct` covers actor eligibility, not the validity/affordability of every possible placement. Factory production remains `null` in this phase.
 
@@ -78,7 +80,7 @@ TWZ_MAYOR_INCOME_INTERVAL_MS=3000
 
 The amount must fit the checked wallet limit and the interval must be positive. Defaults are the normal gameplay values above. These are not `VITE_*` settings. The CI live construction fixture uses 55,000 per 1,000 ms to exercise normal catalog prices quickly.
 
-Rebuild/restart conductor, gateway and cells together, preserving cell IDs. The conductor applies migrations 004 and 005 automatically using `DATABASE_URL`. The existing React client remains protocol-compatible; construction controls arrive in Phase 3c.
+Rebuild/restart conductor, gateway and cells together when installing Phase 3b, preserving cell IDs. The conductor applies migrations 004 and 005 automatically using `DATABASE_URL`. Phase 3c adds its React controls and requires its updated gateway public-message fields; that UI upgrade adds no new database migration.
 
 ## Verification
 

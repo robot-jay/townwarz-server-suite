@@ -179,6 +179,7 @@ async fn authenticated_entry_verifies_user_creates_named_town_and_ends_on_discon
     assert_eq!(failure["type"], "construction_result");
     assert_eq!(failure["result"]["request_id"], request_id.to_string());
     assert_eq!(failure["result"]["error"], "service_unavailable");
+    assert_eq!(failure["outcome_known"], false);
     error_service.abort();
     client
         .send(TMsg::Text("{\"type\":\"quit_game\"}".into()))
@@ -448,7 +449,9 @@ async fn authenticated_construction_live_durable_purchase_replay_demolition_and_
         value: serde_json::Value,
     ) -> Result<serde_json::Value> {
         client.send(TMsg::Text(value.to_string())).await?;
-        Ok(frame(client, "construction_result").await?["result"].clone())
+        let reply = frame(client, "construction_result").await?;
+        assert_eq!(reply["outcome_known"], true);
+        Ok(reply["result"].clone())
     }
     let nats = async_nats::connect(std::env::var("TEST_NATS_URL")?).await?;
     let (auth, tokens) = auth::Auth0::fixture();
@@ -484,6 +487,8 @@ async fn authenticated_construction_live_durable_purchase_replay_demolition_and_
     timeout(Duration::from_secs(10), async {
         loop {
             let value = frame(&mut client, "economy_state").await?;
+            assert!(value["revision"].is_u64());
+            assert!(value["owned_buildings"].is_array());
             if value["cash"].as_u64().unwrap() >= 55000 {
                 return Ok::<_, anyhow::Error>(());
             }
@@ -504,6 +509,13 @@ async fn authenticated_construction_live_durable_purchase_replay_demolition_and_
     );
     let placed = command(&mut client, research.clone()).await?;
     assert!(placed["error"].is_null(), "{placed}");
+    let provenance = frame(&mut client, "economy_state").await?;
+    assert_eq!(provenance["owned_buildings"].as_array().unwrap().len(), 1);
+    assert_eq!(provenance["owned_buildings"][0]["price_paid"], 5000);
+    assert_eq!(
+        provenance["owned_buildings"][0]["building"]["ownership"]["game_id"],
+        id
+    );
     assert_eq!(
         command(&mut client, research.clone()).await?["building_id"],
         placed["building_id"]
@@ -662,13 +674,12 @@ async fn catalog_endpoint_exposes_versioned_readonly_definitions() -> Result<()>
     let app = Router::new().route("/catalog", get(catalog_handler));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let http = reqwest::Client::new();
-    let catalog: serde_json::Value = http
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let response = http.get(&url).send().await?.error_for_status()?;
+    assert_eq!(
+        response.headers()[axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "*"
+    );
+    let catalog: serde_json::Value = response.json().await?;
     assert_eq!(catalog["version"], twz_shared::DOMAIN_VERSION);
     assert_eq!(catalog["buildings"].as_array().unwrap().len(), 28);
     assert_eq!(catalog["items"].as_array().unwrap().len(), 13);

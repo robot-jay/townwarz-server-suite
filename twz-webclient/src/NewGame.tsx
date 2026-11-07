@@ -1,7 +1,8 @@
 import { useCallback, useState, type FormEvent } from 'react';
 import { useAuth0 } from '@auth0/auth0-react';
 import { Brand, Shell } from './Layout';
-import { GameCanvas } from './game/GameCanvas';
+import { ConstructionWorkspace } from './game/ConstructionWorkspace';
+import { formatCash } from './game/construction';
 import { useGameConnection } from './game/useGameConnection';
 import type { ExpiredGameNotice } from './game/domain';
 
@@ -174,16 +175,16 @@ function Game({ game, fallbackTownName, onLeave, onSignOut }: {
         <button className="secondary" disabled={game.quitting} onClick={onSignOut}>Sign out</button>
     </div></header>
     <main className="game-main">
-      <div className="world-toolbar"><span className="eyebrow">{townName} <span className="muted">/ MAYOR</span></span><span className="badge">ALPHA</span></div>
+      <div className="world-toolbar"><span className="eyebrow">{townName} <span className="muted">/ MAYOR</span></span>
+        <div className="wallet-hud" aria-label="Personal cash"><span>PERSONAL CASH</span><strong data-testid="cash-value">{game.cash === null ? '—' : formatCash(game.cash)}</strong></div></div>
       {game.error && <div className="error" role="alert">{game.error}</div>}
-      <div className="viewport">
-        <GameCanvas snapshot={game.snapshot} input={game.input} />
+      <ConstructionWorkspace game={game}>
         {dead && <div className="death-overlay" role="status"><h2>Down, but not out.</h2><p>Respawning at your townhall…</p></div>}
-        <div className="location-chip">SECTOR {Math.floor(game.self.x / 3072)} : {Math.floor(game.self.y / 3072)}<small>{Math.round(game.self.x)}, {Math.round(game.self.y)}</small></div>
-      </div>
+        <div className="location-chip">POSITION<small>{Math.round(game.self.x)}, {Math.round(game.self.y)}</small></div>
+      </ConstructionWorkspace>
       <div className="game-bottom">
         <section className="vitals"><span className="eyebrow">VITALS</span><div className="health"><span className="health-track"><span style={{ width: `${hp}%` }} /></span><b>{game.self.ready ? hp : '—'}<small> / 100</small></b></div></section>
-        <section className="controls"><span><kbd>W</kbd><kbd>S</kbd> Move</span><span><kbd>A</kbd><kbd>D</kbd> Turn</span><span><kbd>SPACE</kbd> / LMB Fire</span></section>
+        <section className="controls"><span><kbd>W</kbd><kbd>S</kbd> Move</span><span><kbd>A</kbd><kbd>D</kbd> Turn</span><span><kbd>SPACE</kbd> / LMB Fire in play mode</span></section>
         <span className="focus-hint">Click the world to take control</span>
       </div>
       <div className="world-footer"><span>Mayor of {townName} · 15-minute reconnect grace</span><span title={game.playerId}>SESSION {game.playerId.slice(0, 8).toUpperCase()}</span></div>

@@ -8,8 +8,8 @@
 | Phase 2 — Physical buildings and reconnect lifecycle | Implemented; see [PHASE2.md](PHASE2.md) and [EXPIRY_ENTRY.md](EXPIRY_ENTRY.md) |
 | Phase 3a — Construction decisions | Complete; agreed rules below |
 | Phase 3b — Server economy and construction | Implemented; see [PHASE3B.md](PHASE3B.md) |
-| Phase 3c — React construction UI | Next task |
-| Phase 3d — Integration verification and acceptance | Planned |
+| Phase 3c — React construction UI | Implemented; see [PHASE3C.md](PHASE3C.md) |
+| Phase 3d — Integration verification and acceptance | Next task |
 | Phases 4–8 | Planned |
 
 Descriptions of the former "current" implementation in the original Phase 1–2 sections are historical starting-point context. Their completion documents describe the implemented behavior. Phase 3a below records the subsequent decisions that refine the original plan.
@@ -192,6 +192,8 @@ Validate:
 **Completion criterion:** Automated server tests prove income, valid and rejected purchases, prerequisite enforcement, demolition, and request replay behavior under the Phase 3a rules.
 
 ### Phase 3c — Implement the React Construction UI
+
+**Status:** Implemented. See [PHASE3C.md](PHASE3C.md) for controls, protocol metadata, safe command replay, browser coverage and deployment. Phase 3d remains the broader integration/failure-window acceptance task.
 
 Add:
 

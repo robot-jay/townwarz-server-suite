@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 pub const SUBJ_ECONOMY: &str = "twz.economy.request";
 pub const SUBJ_ECONOMY_WORLD: &str = "twz.economy.world";
+pub const CONSTRUCTIBLE_BUILDINGS: [BuildingType; 2] =
+    [BuildingType::WallResearch, BuildingType::WallFactory];
 pub fn subj_construction_prepare(server: &str) -> String {
     format!("twz.economy.{server}.prepare")
 }
@@ -195,10 +197,7 @@ impl EconomyState {
                 origin_tile,
                 ..
             } => {
-                if !matches!(
-                    building_type,
-                    BuildingType::WallResearch | BuildingType::WallFactory
-                ) {
+                if !CONSTRUCTIBLE_BUILDINGS.contains(building_type) {
                     return Err(if *building_type == BuildingType::TownHall {
                         ConstructionError::TownHallProtected
                     } else {
@@ -351,6 +350,25 @@ pub struct ConstructionStatus {
     pub territory: Option<TownTerritory>,
     pub can_construct: bool,
     pub reason: Option<ConstructionError>,
+}
+
+/// Public gateway messages consumed by the construction UI. Owned provenance
+/// covers the whole town, not just the current spatial-interest snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConstructionClientMessage {
+    EconomyState {
+        cash: u64,
+        revision: u64,
+        territory: TownTerritory,
+        owned_buildings: Vec<PurchasedBuilding>,
+        constructible_types: Vec<BuildingType>,
+        demolition_refund_percent: u8,
+    },
+    ConstructionResult {
+        result: ConstructionResult,
+        outcome_known: bool,
+    },
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ Before starting Vite, copy `twz-webclient/.env.example` to `twz-webclient/.env` 
 
 Persistence is implemented with SeaORM behind a repository boundary. See [PERSISTENCE.md](PERSISTENCE.md) for entities, transaction/locking guarantees, configuration and database tests.
 
-Phase 3b adds connected Mayor income, durable Wall Research/Factory purchases, 32×32-tile town territories, request replay protection, and 25% original-price demolition refunds. See [PHASE3B.md](PHASE3B.md) for protocol, recovery, and optional development income settings. React construction controls are the next Phase 3c task; [ROADMAP.md](ROADMAP.md) tracks the agreed milestones.
+Phase 3b adds connected Mayor income, durable Wall Research/Factory purchases, 32×32-tile town territories, request replay protection, and 25% original-price demolition refunds. See [PHASE3B.md](PHASE3B.md) for protocol, recovery, and optional development income settings. Phase 3c adds the cash HUD, catalog, placement/territory previews, inspection, demolition and safe retry controls; see [PHASE3C.md](PHASE3C.md). [ROADMAP.md](ROADMAP.md) tracks the agreed milestones; Phase 3d acceptance is next.
 
 Returning after an expired grace period now displays a named, acknowledge-once explanation before normal new-game setup. See [EXPIRY_ENTRY.md](EXPIRY_ENTRY.md) for the expired-game entry flow and future 1-Mayor/4-Commando rejoin contract.
 
@@ -76,7 +76,7 @@ npm --prefix twz-webclient test
 npm --prefix twz-webclient run build
 ```
 
-The root [GitHub Actions workflow](.github/workflows/ci.yml) runs client tests and production build, Rust formatting/compile/workspace tests, and isolated PostgreSQL/NATS/live two-cell integration tests on every PR update and every push to `master`. Client dependencies are installed from `twz-webclient/package-lock.json`. GitHub only discovers workflows in the repository-root `.github/workflows/` directory. No Auth0 secrets are required for CI.
+The root [GitHub Actions workflow](.github/workflows/ci.yml) runs client unit and Chromium browser tests, production build, Rust formatting/compile/workspace tests, and isolated PostgreSQL/NATS/live two-cell integration tests on every PR update and every push to `master`. Client dependencies are installed from `twz-webclient/package-lock.json`; CI also installs Chromium for the isolated, mocked construction UI tests. GitHub only discovers workflows in the repository-root `.github/workflows/` directory. No Auth0 secrets are required for CI.
 
 The PostgreSQL repository integration tests are opt-in and use unique fixture users, cleaning up their own records afterwards. Point them at an isolated development/test database; repository tests do not require NATS:
 

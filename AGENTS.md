@@ -11,6 +11,7 @@
 
 - Run `cargo check --workspace` for a focused compile check, `cargo test --workspace` for the standard workspace tests, and `cargo fmt --all -- --check` to detect formatting drift.
 - Client checks: `npm --prefix twz-webclient ci`, `npm --prefix twz-webclient test`, and `npm --prefix twz-webclient run build` (includes strict TypeScript checking).
+- Client browser checks: install Chromium with Playwright, then `npm --prefix twz-webclient run test:browser`. The suite starts its own Vite server on port 5176 and mocks Auth0/catalog/WebSocket responses; it needs no live Rust services. CI installs Chromium and runs these tests automatically. Browser tests/configuration are included in the client's TypeScript check.
 - The root `.github/workflows/ci.yml` runs client and server checks on PR updates and pushes to `master`. Service-backed Rust tests are ignored in the default suite; `.github/scripts/integration.sh` runs them against isolated PostgreSQL/NATS, then a real conductor and two cells. Do not run mock NATS responders alongside the real conductor on the same subjects.
 
 ## Local Integration

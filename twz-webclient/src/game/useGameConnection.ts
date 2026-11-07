@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { config } from '../config';
 import { emptyInput, isSnapshot, type Snapshot } from './protocol';
 import { isExistingGameSummary, isExpiredGameNotice, type ExistingGameSummary, type ExpiredGameNotice } from './domain';
+import { isEconomyState, isConstructionReply, type EconomyState, type ConstructionIntent } from './construction';
+import { ConstructionCommands, type ConstructionCommandsState } from './constructionCommands';
 
 type Status = 'idle' | 'checking' | 'starting' | 'playing' | 'ended' | 'existing' | 'abandoning' | 'expired' | 'acknowledging';
 type EntryMode = 'check' | 'start' | 'resume' | 'quit' | 'abandon' | 'ack-expiry';
@@ -33,12 +35,21 @@ export function useGameConnection(getIdentityToken: () => Promise<string>) {
   const [ping, setPing] = useState<number | null>(null);
   const [playerId, setPlayerId] = useState('');
   const [self, setSelf] = useState({ x: 0, y: 0, hp: 100, ready: false });
+  const [cash, setCash] = useState<number | null>(null);
+  const [catalogVersion, setCatalogVersion] = useState<number>();
+  const [economy, setEconomy] = useState<EconomyState | null>(null);
+  const latestEconomy = useRef<EconomyState | null>(null);
+  const [constructionCommands, setConstructionCommands] = useState<ConstructionCommandsState>({ pending: null, notice: null });
+  const commands = useRef<ConstructionCommands | null>(null);
+  if (!commands.current) commands.current = new ConstructionCommands(setConstructionCommands);
   const clear = useCallback(() => {
     snapshot.current = null; input.current = emptyInput();
+    commands.current?.disconnect(); latestEconomy.current = null; setEconomy(null); setCash(null); setCatalogVersion(undefined);
     setPing(null); setPlayerId(''); setSelf({ x: 0, y: 0, hp: 100, ready: false });
   }, []);
   const reset = useCallback(() => {
     generation.current++; cancel.current?.(); cancel.current = null; busy.current = false;
+    commands.current?.endSession();
     clear(); rememberExisting(null); rememberExpired(null); hasPlayed.current = false; setError(''); setCanResume(false); setStatus('idle');
   }, [clear, rememberExisting, rememberExpired]);
 
@@ -67,6 +78,7 @@ export function useGameConnection(getIdentityToken: () => Promise<string>) {
         const finish = (message: string, next: Status, resumable: boolean, ok = false) => {
           if (stopped) return;
           resolve(ok); quitReply.current?.(ok); quitReply.current = null;
+          if (!resumable) commands.current?.endSession();
           cleanup(); busy.current = false; clear(); setError(message); setStatus(next); setCanResume(resumable);
         };
         const deadline = setTimeout(() => finish('The game server did not finish the request. Please try again.', failureStatus(), true), 30000);
@@ -96,6 +108,8 @@ export function useGameConnection(getIdentityToken: () => Promise<string>) {
             const message: unknown = JSON.parse(event.data);
             if (isSnapshot(message) && (mode === 'start' || mode === 'resume')) {
               snapshot.current = message; setPlayerId(message.me);
+              setCatalogVersion(message.catalog_version);
+              if (!latestEconomy.current && message.self_state) setCash(message.self_state.wallet.cash);
               const me = message.players.find(p => p[0] === message.me);
               if (me) {
                 if (!entered) {
@@ -104,11 +118,23 @@ export function useGameConnection(getIdentityToken: () => Promise<string>) {
                     is_connected: true, reconnect_until_ms: null });
                 }
                 rememberExpired(null);
+                commands.current?.setSession(message.self_state?.identity.game_id ?? message.me, command => {
+                  if (stopped || ws.readyState !== WebSocket.OPEN || quitBusy.current) return false;
+                  ws.send(JSON.stringify({ v: 1, ...command })); return true;
+                });
                 entered = true; hasPlayed.current = true; clearTimeout(deadline); setCanResume(true); setStatus('playing');
                 setSelf({ x: me[1], y: me[2], hp: me[4], ready: true }); resolve(true);
               }
             } else if (message && typeof message === 'object' && 'type' in message) {
-              if (message.type === 'existing_game' && 'game' in message && isExistingGameSummary(message.game)) {
+              if (entered && isEconomyState(message)) {
+                const ownGame = snapshot.current?.self_state?.identity.game_id ?? snapshot.current?.me;
+                if (message.owned_buildings.every(record => record.building.ownership?.game_id === ownGame)
+                  && (!latestEconomy.current || message.revision >= latestEconomy.current.revision)) {
+                  latestEconomy.current = message; setEconomy(message); setCash(message.cash);
+                }
+              } else if (entered && isConstructionReply(message)) {
+                commands.current?.receive(message);
+              } else if (message.type === 'existing_game' && 'game' in message && isExistingGameSummary(message.game)) {
                 rememberExpired(null); rememberExisting(message.game); finish('', 'existing', true, true);
               } else if (message.type === 'grace_expired' && 'notice' in message && isExpiredGameNotice(message.notice)) {
                 rememberExisting(null); rememberExpired(message.notice); finish('', 'expired', false, true);
@@ -151,6 +177,7 @@ export function useGameConnection(getIdentityToken: () => Promise<string>) {
     return () => {
       clearTimeout(timer); generation.current++; cancel.current?.(); busy.current = false;
       snapshot.current = null; input.current = emptyInput(); quitReply.current?.(false); quitReply.current = null;
+      commands.current?.dispose();
     };
   }, []);
 
@@ -189,6 +216,17 @@ export function useGameConnection(getIdentityToken: () => Promise<string>) {
     finally { quitBusy.current = false; setQuitting(false); }
   }, [connect]);
 
-  return { snapshot, input, status, error, canResume, existingGame, expiredGame, quitting, ping, playerId, self, reset, quit, abandonGame, acknowledgeExpiry,
+  const submitConstruction = useCallback((intent: ConstructionIntent) => {
+    if (status !== 'playing' || quitBusy.current) return false;
+    return commands.current?.submit(intent) ?? false;
+  }, [status]);
+  const retryConstruction = useCallback(() => {
+    if (status !== 'playing' || quitBusy.current) return false;
+    return commands.current?.retry() ?? false;
+  }, [status]);
+
+  return { snapshot, input, status, error, canResume, existingGame, expiredGame, quitting, ping, playerId, self,
+    cash, economy, catalogVersion, constructionCommands, submitConstruction, retryConstruction,
+    dismissConstructionNotice: () => commands.current?.dismissNotice(), reset, quit, abandonGame, acknowledgeExpiry,
     checkGame: () => connect('check'), startGame: (name: string) => connect('start', name), resumeGame: () => connect('resume') };
 }

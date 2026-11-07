@@ -37,6 +37,18 @@ jobs:
         run: npm test
       - name: Typecheck and build production client
         run: npm run build
+      - name: Install browser test runtime
+        run: npx playwright install --with-deps chromium
+      - name: Run construction browser tests
+        run: npm run test:browser
+      - name: Upload browser diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: construction-browser-diagnostics
+          path: twz-webclient/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
 
   workspace:
     name: Rust formatting, compile check and unit tests
