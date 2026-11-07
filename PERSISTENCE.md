@@ -17,6 +17,8 @@ NATS commands
 - `persistence/repository.rs`: pooled connection setup, domain conversion, profile upserts, inserts, projections, connection claims, termination and expiry.
 - `persistence/sql/`: focused parameterized SQL for PostgreSQL-specific locking/allocation and compare-and-update operations.
 - `persistence/tests.rs`: opt-in real PostgreSQL lifecycle and concurrency checks.
+- `twz-migrate/`: deployment-only SeaORM migration framework/CLI and immutable SQL migration history.
+- `twz-schema/`: read-only runtime compatibility/version/column-shape checks.
 
 `TownRegistry` contains no SQL, ORM entities, database connections or database mutex. Repository results contain `Town`, `PlayerState`, connection IDs or affected domain records. NATS publishing stays in the application service, after database operations commit.
 
@@ -45,7 +47,9 @@ All runtime values in these statements are bound parameters. The standalone SQL 
 
 ## Schema and configuration
 
-Use the existing workspace-root `.env` and `DATABASE_URL`. The ORM refactor itself required no schema/data change. Startup applies the idempotent `001_games.sql`, `002_reconnect.sql`, `003_expiry_notice.sql`, `004_economy.sql`, and `005_participation_order.sql` files transactionally, protected by migration and allocation advisory locks. The third migration adds the acknowledge-once expiry notice; the fourth adds durable economic state; the fifth adds sequence-backed participation ordering so wall-clock corrections cannot change which game/hall was most recent. Existing history is backfilled from its recorded timestamps. Entity definitions map the schema; they do not automatically recreate tables or synchronize/drop columns.
+Use workload-scoped `DATABASE_URL`: a deployment identity for `twz-migrate up` and a restricted application identity for the conductor. Migrations live in `twz-migrate/migrations/` and run as a separate release operation. The original five idempotent SQL files are preserved; migration 006 adds schema compatibility metadata, and SeaORM tracks applied names/timestamps in `seaql_migrations`. Initial adoption of an existing database runs the original SQL rather than blindly stamping a baseline. The runner uses migration and allocation advisory locks and a release transaction.
+
+`GameRepository::connect` performs read-only compatibility checks through `twz-schema`; it never creates/alters tables or migration history. Missing/old/drifted schemas fail before conductor HTTP/NATS handlers start. Newer additive schemas remain supported when their minimum reader contract permits this application; breaking reader requirements are rejected. Entity definitions map tables rather than synchronizing/recreating them. See [DEPLOYMENT.md](DEPLOYMENT.md) for commands, permissions, search paths and rollout/rollback behavior.
 
 Gameplay and wire behavior remain the same: player-owned wallets, checkpoints, 15-minute reconnect grace, stale-token fencing, explicit quit, promotion hooks, and terminal Orb handling.
 
@@ -60,7 +64,12 @@ For an isolated development/test database:
 
 ```powershell
 $env:TEST_DATABASE_URL = 'postgres://postgres:your-password@127.0.0.1:5432/townwarz_test'
+$env:DATABASE_URL = $env:TEST_DATABASE_URL
+cargo build --locked -p twz-migrate -p twz-conductor -p twz-cellserver
+cargo run --locked -p twz-migrate -- up
 cargo test --workspace postgres_ -- --ignored --nocapture
 ```
 
 Repository tests no longer require NATS. They cover profile upsert, existing-data preservation on reopening, checkpoint/inventory round trips, grace reservation, stale heartbeat/disconnect/quit rejection, idempotent end, timeout, history retention, and simultaneous hall/account/resume claims using independent pools. Random-allocation checks cover avoiding immediate repeats, valid generated sites, per-site generation history, full-pool expansion and reserved-hall exclusion. Fixtures are scoped to unique test users and cleaned up. The normal gateway live-cell integration still exercises the application service and NATS event path with PostgreSQL behind it.
+
+Deployment tests also cover empty/legacy schema initialization, repeat and concurrent runners, failed-release rollback, future-reader compatibility, a restricted runtime login with denied DDL, and a real unmigrated conductor process that fails without creating tables. These fixtures create isolated schemas; the permission test requires test-role administration privileges. CI runs the explicit migration gate before these opt-in tests.

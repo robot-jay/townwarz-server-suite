@@ -1,7 +1,8 @@
 use anyhow::Result;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QuerySelect, Set,
 };
 use twz_shared::*;
 
@@ -14,6 +15,198 @@ use super::{
 // Tests share an externally supplied development DB. Serialize their fixtures;
 // each concurrency test still uses independent connections and simultaneous calls.
 static FIXTURES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// A failed assertion must not leave a cluster-wide test login behind. Cleanup
+// uses a separate runtime/thread so it also works while unwinding an async test.
+struct RuntimeRole {
+    url: String,
+    name: String,
+}
+impl Drop for RuntimeRole {
+    fn drop(&mut self) {
+        let url = self.url.clone();
+        let role = self.name.clone();
+        let _ = std::thread::spawn(move || {
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                runtime.block_on(async move {
+                    if let Ok(db) = sea_orm::Database::connect(&url).await {
+                        if let Err(error) = db
+                            .execute_unprepared(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
+                            .await
+                        {
+                            eprintln!("test role cleanup failed: {error}");
+                        }
+                        let _ = db.close().await;
+                    }
+                });
+            }
+        })
+        .join();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL with test schema/role administration privileges"]
+async fn postgres_runtime_repository_operates_without_schema_ownership_or_ddl() -> Result<()> {
+    let _fixtures = FIXTURES.lock().await;
+    let base = std::env::var("TEST_DATABASE_URL")?;
+    let admin = sea_orm::Database::connect(&base).await?;
+    let suffix = ClientId::new_v4().simple().to_string();
+    let schema = format!("runtime_test_{suffix}");
+    let role = format!("twz_runtime_test_{suffix}");
+    let password = ClientId::new_v4().to_string();
+    admin
+        .execute_unprepared(&format!(
+            "CREATE SCHEMA {schema}; CREATE ROLE {role} LOGIN PASSWORD '{password}'"
+        ))
+        .await?;
+    let cleanup = RuntimeRole {
+        url: base.clone(),
+        name: role.clone(),
+    };
+    let mut scoped = url::Url::parse(&base)?;
+    scoped
+        .query_pairs_mut()
+        .append_pair("options", &format!("-c search_path={schema}"));
+    let owner = sea_orm::Database::connect(scoped.as_str()).await?;
+    twz_migrate::migrate(&owner).await?;
+    admin
+        .execute_unprepared(&format!(
+            "GRANT USAGE ON SCHEMA {schema} TO {role};
+        GRANT SELECT,INSERT,UPDATE,DELETE ON {schema}.twz_users,{schema}.twz_games TO {role};
+        GRANT SELECT ON {schema}.seaql_migrations,{schema}.twz_schema_metadata TO {role};
+        GRANT USAGE,SELECT ON SEQUENCE {schema}.twz_participation_order_seq TO {role}"
+        ))
+        .await?;
+    scoped.set_username(&role).unwrap();
+    scoped.set_password(Some(&password)).unwrap();
+    let repository = GameRepository::connect(scoped.as_str()).await?;
+    assert!(repository
+        .db
+        .execute_unprepared("CREATE TABLE forbidden_ddl(id INTEGER)")
+        .await
+        .is_err());
+    assert!(repository
+        .db
+        .execute_unprepared("ALTER TABLE twz_games ADD COLUMN forbidden_ddl INTEGER")
+        .await
+        .is_err());
+    let account = user();
+    let game = repository
+        .create_game(&account, ClientId::new_v4(), "Runtime Permissions")
+        .await?;
+    let id = game.town.mayor_player_id;
+    let mut economy = repository
+        .begin_economy(id, game.connection_id)
+        .await?
+        .unwrap();
+    economy
+        .state
+        .accrue(game.connection_id, 3000, IncomePolicy::default());
+    economy.commit().await?;
+    repository
+        .update_connection(
+            &GameConnection {
+                player_id: id,
+                connection_id: game.connection_id,
+                checkpoint: Some(game.player_state),
+            },
+            true,
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .resume_game(&account.sub)
+            .await?
+            .unwrap()
+            .player_state
+            .game
+            .wallet
+            .cash,
+        100
+    );
+    assert_eq!(
+        twz_schema::ensure_compatible(&repository.db).await?.version,
+        6
+    );
+    repository.db.clone().close().await?;
+    owner.close().await?;
+    admin
+        .execute_unprepared(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await?;
+    drop(cleanup);
+    admin.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL and a built conductor (TEST_SERVICE_BIN_DIR)"]
+async fn postgres_unmigrated_conductor_fails_before_serving_and_does_not_create_tables(
+) -> Result<()> {
+    let _fixtures = FIXTURES.lock().await;
+    let base = std::env::var("TEST_DATABASE_URL")?;
+    let admin = sea_orm::Database::connect(&base).await?;
+    let schema = format!("unmigrated_test_{}", ClientId::new_v4().simple());
+    admin
+        .execute_unprepared(&format!("CREATE SCHEMA {schema}"))
+        .await?;
+    let mut scoped = url::Url::parse(&base)?;
+    scoped
+        .query_pairs_mut()
+        .append_pair("options", &format!("-c search_path={schema}"));
+    assert!(format!(
+        "{:#}",
+        GameRepository::connect(scoped.as_str())
+            .await
+            .err()
+            .unwrap()
+    )
+    .contains("twz-migrate up"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let bins = std::env::var_os("TEST_SERVICE_BIN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("target/debug"));
+    let executable = bins.join(format!("twz-conductor{}", std::env::consts::EXE_SUFFIX));
+    let mut child = std::process::Command::new(executable)
+        .args(["--bind", "127.0.0.1:0", "--nats", "nats://127.0.0.1:1"])
+        .env("DATABASE_URL", scoped.as_str())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if child.try_wait()?.is_some() {
+                return Ok::<_, std::io::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if exited.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("conductor did not fail fast on the missing deployment schema");
+    }
+    exited??;
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("twz-migrate up"));
+    let empty = sea_orm::Database::connect(scoped.as_str()).await?;
+    let count = empty.query_one(sea_orm::Statement::from_string(sea_orm::DbBackend::Postgres,
+        "SELECT COUNT(*)::bigint AS count FROM information_schema.tables WHERE table_schema=current_schema()".to_owned())).await?.unwrap();
+    assert_eq!(count.try_get::<i64>("", "count")?, 0);
+    empty.close().await?;
+    admin
+        .execute_unprepared(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await?;
+    admin.close().await?;
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires an isolated TEST_DATABASE_URL"]
@@ -263,7 +456,7 @@ async fn postgres_grace_resume_fencing_quit_orb_and_expiry() -> Result<()> {
         "disconnected hall is reserved"
     );
 
-    // Startup migrations are idempotent over existing profiles/checkpoints.
+    // Reopening the runtime repository validates but never alters the schema.
     let reopened = GameRepository::connect(&url).await?;
     let resumed = reopened.resume_game(&user.sub).await?.unwrap();
     assert_eq!(resumed.player_state, checkpoint);

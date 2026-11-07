@@ -32,6 +32,8 @@ The live browser test is `twz-webclient/tests/phase3-live.spec.ts`. Auth0's exte
 
 The harness reaps its service children and aborts its gateway/listener tasks on completion or failure. PostgreSQL/NATS remain owned by the caller/CI job. It writes service logs under `target/ci-logs/phase3-*`; Playwright traces/screenshots use `twz-webclient/test-results/live/`. Mock browser diagnostics use a separate `test-results/mocked/` folder.
 
+The later deployment separation requires a built `twz-migrate` alongside the conductor/cell executables. The outer integration script and each independently managed acceptance suite explicitly run the migration command before starting applications; runtime restart paths only validate schema compatibility. The conductor's Docker supervisor was removed; fixture child-process management remains test orchestration, not application behavior. See [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Recovery fixes found during acceptance
 
 1. **Cell re-registration:** Cells now re-send their original registration when a heartbeat receives `404 unknown_server`. A restarted conductor can recover the live cell directory with stable IDs/addresses, without requiring those cells to be restarted. The pre-commit process-crash test verifies this path.

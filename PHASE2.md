@@ -26,7 +26,7 @@ Movement includes building collision, and physics delta is capped at 100ms to av
 
 ## Lifecycle, persistence and fencing
 
-Migration `twz-conductor/migrations/002_reconnect.sql` adds connection token, disconnect time, player checkpoint JSON, and end reason. It is applied automatically on conductor startup. Existing user and game history is retained. The current playable model permits one active mayor game per Auth0 subject; another live connection is rejected rather than duplicating an avatar.
+Migration `twz-migrate/migrations/002_reconnect.sql` adds connection token, disconnect time, player checkpoint JSON, and end reason. It is now applied by the separate `twz-migrate up` deployment step; the conductor only validates compatibility at startup. Existing user and game history is retained. The current playable model permits one active mayor game per Auth0 subject; another live connection is rejected rather than duplicating an avatar.
 
 The gateway captures private authoritative player snapshots in memory, checkpoints to PostgreSQL on its 10-second heartbeat, and asks the current cell for a final paused checkpoint when a browser disconnects. That checkpoint preserves position, health/respawn timer, wallet, inventory, cooldowns, home spawn, identity, and damage contributions. The cell removes the avatar without clearing the retained town/assets. Resume routes to the checkpoint's current cell and restores it before attaching the socket.
 
@@ -64,7 +64,7 @@ An elapsed grace period now returns a `grace_expired` entry dialog rather than s
 
 ## Deployment and checks
 
-Rebuild/restart **conductor, gateway, and all cell servers together**. The old 45-second terminal lease policy and fresh-game-only client are superseded. No new .env keys are required. The migration runs automatically with the existing DATABASE_URL.
+Rebuild/restart **conductor, gateway, and all cell servers together** when installing this lifecycle protocol. The old 45-second terminal lease policy and fresh-game-only client are superseded. No new gameplay .env keys are required. Run the explicit migration deployment step with its `DATABASE_URL` before application rollout; see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ```sh
 cargo check --workspace

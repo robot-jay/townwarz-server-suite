@@ -4,10 +4,12 @@ The Rust game services and React browser client live in this repository:
 
 | Directory | Purpose |
 | --- | --- |
-| `twz-conductor/` | Cell registration, routing, persistence and service supervision |
+| `twz-conductor/` | Cell registration, routing, game/economy coordination and runtime persistence |
 | `twz-gateway/` | Authenticated browser WebSocket entry and relay |
 | `twz-cellserver/` | Authoritative game simulation |
 | `twz-shared/` | Shared Rust contracts and domain definitions |
+| `twz-schema/` | Read-only application/schema compatibility contract |
+| `twz-migrate/` | One-shot versioned deployment migration command |
 | `twz-webclient/` | React + TypeScript + Vite browser client |
 
 The browser client is an ordinary directory in this repository; no submodule initialization is needed. Cargo commands run from the repository root. npm commands run in `twz-webclient/`, or use `npm --prefix twz-webclient ...` from the root.
@@ -24,6 +26,8 @@ npm --prefix twz-webclient run dev
 Before starting Vite, copy `twz-webclient/.env.example` to `twz-webclient/.env` and configure the public `VITE_AUTH0_*` values. The root `.env` configures Rust services; the client has its own `.env` in its directory. Open **http://localhost:5173**. The gateway defaults to **ws://localhost:8081/play**. See [the client README](twz-webclient/README.md) for Auth0 setup, controls and production hosting.
 
 Persistence is implemented with SeaORM behind a repository boundary. See [PERSISTENCE.md](PERSISTENCE.md) for entities, transaction/locking guarantees, configuration and database tests.
+
+Container lifecycles are managed externally by the deployment platform. Before starting/updating services, run **`cargo run --locked -p twz-migrate -- up`** as a separate deployment step and require success. The conductor validates the schema but performs no DDL. See [DEPLOYMENT.md](DEPLOYMENT.md) for existing-database adoption, independent workload configuration and separate database identities.
 
 Phase 3 is complete: connected Mayor income, durable Wall Research/Factory purchases, town territories, replay protection, original-price demolition refunds and the React construction UI. See [PHASE3B.md](PHASE3B.md) for the server, [PHASE3C.md](PHASE3C.md) for controls, and [PHASE3D.md](PHASE3D.md) for real-service/browser and failure-window acceptance. [ROADMAP.md](ROADMAP.md) tracks the agreed milestones; Phase 4's production/inventory/deployment loop is next.
 
@@ -53,7 +57,7 @@ AUTH0_CLIENT_ID=your-client-id
 
 - Create the `townwarz` PostgreSQL database first. The local `affectionate_shtern` container's `townwarz` database was created during implementation; other databases were left alone.
 - New games randomly choose among free generated halls, starting with a 16-site region and growing it as claims fill up. The account's previous hall is skipped for its next fresh game. Reconnects preserve their saved hall, and active/15-minute-reserved halls remain protected.
-- The conductor requires `DATABASE_URL`. Its SeaORM repository maps the existing tables and automatically applies the idempotent SQL files in `twz-conductor/migrations/`. PostgreSQL TLS settings follow the connection URL/SQLx defaults.
+- The conductor requires runtime `DATABASE_URL` and a compatible, already-migrated schema. `twz-migrate` applies the versioned SQL in `twz-migrate/migrations/` using deployment credentials. PostgreSQL TLS settings follow the connection URL/SQLx defaults.
 - The gateway requires the two Auth0 values for `/play`. They must match the web client's `VITE_AUTH0_DOMAIN` and `VITE_AUTH0_CLIENT_ID`. Use the Auth0 hostname without `https://`. No client secret or additional Auth0 API audience is required. The SPA must use RS256 signing.
 - Run `cargo run` commands from the workspace root so dotenv finds `.env`. Environment variables take precedence over dotenv.
 - `twz_users` stores verified Auth0 identity/profile data; `twz_games` stores game role, town details, and start/end times. Town names are trimmed and validated server-side (2–32 Unicode characters; letters, numbers, spaces, apostrophes, hyphens). Names need not be unique.
@@ -64,7 +68,7 @@ AUTH0_CLIENT_ID=your-client-id
 
 ### Docker configuration
 
-For a conductor container, supply `--env-file .env` (or explicit `-e DATABASE_URL=...`) and use a database hostname reachable **from the container**, e.g. `host.docker.internal:5432` on Docker Desktop. The Docker supervisor forwards `AUTH0_DOMAIN` and `AUTH0_CLIENT_ID` from its own environment into the gateway. Supply all three values to the conductor container, rebuild the service images after Rust changes, and recreate existing containers so new environment settings take effect.
+Run the conductor, gateway, cells, NATS and database as independently managed workloads. Supply runtime `DATABASE_URL` to the conductor and deployment `DATABASE_URL` to the migration job; configure `AUTH0_DOMAIN` and `AUTH0_CLIENT_ID` directly on the gateway. Use dependency hostnames reachable **from each container**, e.g. `host.docker.internal:5432` for a host database on Docker Desktop. No Docker socket or supervisor configuration is mounted into the conductor. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### Verification
 
@@ -81,7 +85,10 @@ The root [GitHub Actions workflow](.github/workflows/ci.yml) runs client unit an
 The PostgreSQL repository integration tests are opt-in and use unique fixture users, cleaning up their own records afterwards. Point them at an isolated development/test database; repository tests do not require NATS:
 
 ```powershell
-$env:TEST_DATABASE_URL = $env:DATABASE_URL
+$env:TEST_DATABASE_URL = 'postgres://postgres:your-password@127.0.0.1:5432/townwarz_test'
+$env:DATABASE_URL = $env:TEST_DATABASE_URL
+cargo build --locked -p twz-migrate -p twz-conductor -p twz-cellserver
+cargo run --locked -p twz-migrate -- up
 cargo test --workspace postgres_ -- --ignored --nocapture
 ```
 
@@ -93,10 +100,11 @@ For the live-cell integration test, also set `TEST_CONDUCTOR_URL` to an isolated
 - Many clients talk to the game gateway.
 - The game gateway talks to many cell servers.
 - Each cell server acts as an authoritative source for game state, and manages inputs and state updates for the clients, then retransmits the states to each client within its "cell".
-- There is a conductor behind the scenes that decides which clients use which cell server. Eventually the conductor will also handle scaling the app by provisioning new resources and spawning new cell server instances.
+- The conductor coordinates cell registration, routing, game lifecycle and economic persistence. The deployment platform provisions/restarts containers; logical cell reassignment remains application work for later phases.
 - All of the interprocess communication happens via a NATS server.
 
 ## To run the app, you need to start all the various processes in order. That order is:
+- Deployment migrations (`cargo run --locked -p twz-migrate -- up`, after PostgreSQL is available)
 - NATS server
 - Conductor
 - Cell server A
@@ -105,11 +113,14 @@ For the live-cell integration test, also set `TEST_CONDUCTOR_URL` to an isolated
 - Browser client (`npm --prefix twz-webclient run dev`)
 
 ## The current commands used for local dev are:
-```Conductor
-cargo run -p twz-conductor -- --bind 0.0.0.0:7000
+```Deployment migration (once per release, after PostgreSQL is available)
+cargo run --locked -p twz-migrate -- up
 ```
 ```NATS server
 nats-server -p 4222 -js
+```
+```Conductor
+cargo run -p twz-conductor -- --bind 0.0.0.0:7000
 ```
 ```Cell server A
 cargo run -p twz-cellserver -- --id A --bind 127.0.0.1:3001 --conductor http://127.0.0.1:7000 --nats nats://127.0.0.1:4222
@@ -121,21 +132,15 @@ cargo run -p twz-cellserver -- --id B --bind 127.0.0.1:3002 --conductor http://1
 cargo run -p twz-gateway -- --bind 0.0.0.0:8081 --conductor http://127.0.0.1:7000 --nats nats://127.0.0.1:4222
 ```
 
-Alternatively, you can use docker to spin up the conductor, which will itself spin up the necessary containers. For now, the conductor toml is configured to run 2 cell servers. Each container image will need to be built with separate commands:
+## Container images
 
-```Conductor
-docker build -t twz-conductor:local --build-arg BIN=twz-conductor -f twz-conductor/Dockerfile .
+Build from the repository root:
+
+```sh
+docker build -t twz-migrate:local -f twz-migrate/Dockerfile .
+docker build -t twz-conductor:local -f twz-conductor/Dockerfile .
+docker build -t twz-gateway:local -f twz-gateway/Dockerfile .
+docker build -t twz-cellserver:local -f twz-cellserver/Dockerfile .
 ```
 
-```Gateway
-docker build -t twz-gateway:local --build-arg BIN=twz-gateway -f twz-gateway/Dockerfile .
-```
-
-```Cellserver
-docker build -t twz-cellserver:local --build-arg BIN=twz-cellserver -f twz-cellserver/Dockerfile .
-```
-
-Then the actual conductor can be run with:
-```Powershell
-docker run --rm -it --name twz-conductor --user 0:0 --network twz_net -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD\twz-conductor\conductor.toml:/app/conductor.toml" -p 7000:7000 -e RUST_BACKTRACE=1 -e RUST_LOG=info twz-conductor:local --bind 0.0.0.0:7000 --nats nats://twz-nats:4222 --supervise --config /app/conductor.toml
-```
+Run the migration image's `up` command once as a release gate, then let the platform manage the application images independently. The conductor exposes internal `GET /health` after startup validation. Gateway/cell addresses, stable cell IDs and credentials are external deployment configuration; the conductor no longer accepts `--supervise` or supervisor `--config` arguments.

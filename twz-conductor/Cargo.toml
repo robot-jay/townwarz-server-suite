@@ -21,10 +21,11 @@ clap = { version = "4", features = ["derive"] }
 nanoid = "0.4"
 url = "2.5"
 
-bollard = "0.16"
-toml = "0.8"
-
 # Link to your workspace crate
 twz-shared = { path = "../twz-shared" }
+twz-schema = { path = "../twz-schema" }
 sea-orm = { version = "1.1.19", default-features = false, features = ["macros", "sqlx-postgres", "runtime-tokio-rustls", "with-json", "with-chrono"] }
 dotenvy = "0.15"
+
+[dev-dependencies]
+twz-migrate = { path = "../twz-migrate" }

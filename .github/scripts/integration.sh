@@ -19,6 +19,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Explicit deployment gate: application startup must never install the schema.
+"$TEST_SERVICE_BIN_DIR/twz-migrate" up 2>&1 | tee target/ci-logs/migrations.log
+"$TEST_SERVICE_BIN_DIR/twz-migrate" check
+
 # NATS has no HTTP health endpoint enabled in its default container image.
 python3 - <<'PY'
 import os
@@ -70,8 +74,8 @@ wait_for_http() {
 target/debug/twz-conductor --bind 127.0.0.1:7000 --nats "$TEST_NATS_URL" \
   >target/ci-logs/conductor.log 2>&1 &
 pids+=("$!")
-# Routing reports no servers (503) until the first cell has registered.
-wait_for_http "$TEST_CONDUCTOR_URL/route/cell/0/0" "${pids[0]}" 503
+# Startup health is independent of whether cells have registered yet.
+wait_for_http "$TEST_CONDUCTOR_URL/health" "${pids[0]}"
 
 for cell in A B; do
   if [[ "$cell" == A ]]; then port=3001; else port=3002; fi

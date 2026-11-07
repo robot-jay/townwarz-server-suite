@@ -26,8 +26,6 @@ mod persistence;
 mod town_registry;
 use crate::town_registry::TownRegistry;
 
-mod supervisor;
-
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(long, default_value = "0.0.0.0:7000")]
@@ -35,12 +33,6 @@ struct Args {
 
     #[arg(long, default_value = "nats://127.0.0.1:4222")]
     nats: String,
-
-    #[arg(long, default_value = "false")]
-    supervise: bool,
-
-    #[arg(long, default_value = "conductor.toml")]
-    config: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,23 +113,18 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let state = AppState::default();
 
-    if args.supervise {
-        let cfg_path = args.config.clone();
-        tokio::spawn(async move {
-            use crate::supervisor::{Backend, Supervisor};
-            if let Ok(sup) =
-                Supervisor::from_toml_file(Backend::Docker, cfg_path, Duration::from_secs(10))
-            {
-                if let Err(e) = sup.run().await {
-                    tracing::error!("supervisor error: {e:#}");
-                }
-            } else {
-                tracing::error!("failed to load supervisor config");
-            }
-        });
-    }
+    // Deployment migrations must have succeeded before application startup.
+    // Validate before opening HTTP/NATS handlers; this connection performs no DDL.
+    let database_url = std::env::var("DATABASE_URL").map_err(|_| {
+        anyhow::anyhow!("Set DATABASE_URL for the conductor runtime database identity")
+    })?;
+    let games = persistence::GameRepository::connect(&database_url).await?;
+    let client = connect_nats_with_retry(&args.nats, 30).await?;
+    let reg = TownRegistry::new(client, games);
+    reg.serve(state.clone()).await?;
 
     let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
         .route("/register", post(register))
         .route("/heartbeat", post(heartbeat))
         .route("/route_cell/:id", get(route_cell))
@@ -146,28 +133,9 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state.clone());
 
     let addr: SocketAddr = args.bind.parse()?;
-    tracing::info!("Conductor HTTP listening on {}", addr);
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("http server error: {e}");
-        }
-    });
-
-    let nats_url = args.nats.clone();
-
-    if args.supervise && nats_url.contains("twz-nats") {
-        wait_socket("twz-nats", 4222, 30).await?;
-    }
-
-    let client = connect_nats_with_retry(&nats_url, 30).await?;
-    let database_url = std::env::var("DATABASE_URL")
-        .map_err(|_| anyhow::anyhow!("Set DATABASE_URL in the server suite .env file"))?;
-    let reg = TownRegistry::new(client.clone(), &database_url).await?;
-    reg.serve(state).await?;
-
-    std::future::pending::<()>().await;
+    tracing::info!("Conductor HTTP listening on {}", addr);
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
@@ -293,6 +261,12 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod routing_tests {
     use super::*;
+    #[test]
+    fn conductor_cli_has_no_container_lifecycle_mode() {
+        assert!(Args::try_parse_from(["twz-conductor", "--bind", "127.0.0.1:7000"]).is_ok());
+        assert!(Args::try_parse_from(["twz-conductor", "--supervise"]).is_err());
+        assert!(Args::try_parse_from(["twz-conductor", "--config", "conductor.toml"]).is_err());
+    }
     #[tokio::test]
     async fn registrations_do_not_reassign_known_cells_and_missing_pinned_owners_fail_closed() {
         let state = AppState::default();

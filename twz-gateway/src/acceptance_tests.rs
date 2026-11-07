@@ -103,6 +103,18 @@ impl Suite {
         let cp = port()?;
         let conductor_url = format!("http://127.0.0.1:{cp}");
         let program = |name: &str| bins.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        // Each independently managed suite explicitly gates its rollout. This
+        // remains safe after the outer CI migration step because history makes
+        // the command idempotent; the conductor itself must perform no DDL.
+        let migration = Command::new(program("twz-migrate"))
+            .arg("up")
+            .env("DATABASE_URL", &database)
+            .status()
+            .context("run deployment migration command before acceptance services")?;
+        anyhow::ensure!(
+            migration.success(),
+            "deployment migrations failed; refusing to start acceptance services"
+        );
         let mut conductor = Service {
             child: None,
             executable: program("twz-conductor"),
@@ -119,6 +131,7 @@ impl Suite {
         conductor.start()?;
         let nats = async_nats::connect(&nats_url).await?;
         ready_registry(&nats).await?;
+        ready_http(&format!("{conductor_url}/health")).await?;
         let db = Database::connect(&database).await?;
         // Only the signed fixture account is retired; repository tests have
         // separate subjects. This allows failed cases to leave useful history.
@@ -285,6 +298,7 @@ impl Suite {
         self.conductor.stop();
         self.conductor.start()?;
         ready_registry(&self.nats).await?;
+        ready_http(&format!("{}/health", self.conductor_url)).await?;
         for id in &self.cell_ids {
             ready_http(&format!("{}/server/{id}", self.conductor_url)).await?;
         }

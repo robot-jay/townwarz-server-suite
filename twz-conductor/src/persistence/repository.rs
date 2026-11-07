@@ -15,8 +15,7 @@ use twz_shared::{
 
 use super::entities::{games, users};
 
-const ALLOCATION_LOCK: i64 = 7_489_221;
-const MIGRATION_LOCK: i64 = 7_489_220;
+const ALLOCATION_LOCK: i64 = twz_schema::ALLOCATION_LOCK;
 const STALE_CONNECTION_SECONDS: i64 = 45;
 // Sixteen sites form a 4x4 hall grid across the initial 2x2 routing cells.
 // Allocation grows beyond this floor as live/reserved claims fill the region.
@@ -96,27 +95,7 @@ impl GameRepository {
             "TownWarz requires PostgreSQL."
         );
 
-        // Preserve the existing idempotent schema files and serialize DDL when
-        // several repository instances start against the same database.
-        let migration = db.begin().await?;
-        lock(&migration, MIGRATION_LOCK).await?;
-        lock(&migration, ALLOCATION_LOCK).await?;
-        migration
-            .execute_unprepared(include_str!("../../migrations/001_games.sql"))
-            .await?;
-        migration
-            .execute_unprepared(include_str!("../../migrations/002_reconnect.sql"))
-            .await?;
-        migration
-            .execute_unprepared(include_str!("../../migrations/003_expiry_notice.sql"))
-            .await?;
-        migration
-            .execute_unprepared(include_str!("../../migrations/004_economy.sql"))
-            .await?;
-        migration
-            .execute_unprepared(include_str!("../../migrations/005_participation_order.sql"))
-            .await?;
-        migration.commit().await?;
+        twz_schema::ensure_compatible(&db).await?;
         Ok(Self { db })
     }
 

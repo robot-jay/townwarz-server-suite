@@ -45,7 +45,7 @@ The client waits for acknowledgement before opening fresh role/name setup. Failu
 
 ## Deployment and checks
 
-Migration `twz-conductor/migrations/003_expiry_notice.sql` adds nullable `expiry_notice_ack_at` and is applied automatically by the SeaORM repository. No new environment variables are needed. Update conductor, gateway and client together; restart cells as needed to re-register with a restarted conductor.
+Migration `twz-migrate/migrations/003_expiry_notice.sql` adds nullable `expiry_notice_ack_at`. Run `twz-migrate up` as the deployment gate before starting/updating applications; runtime repository connections only validate the schema. No new gameplay environment variables are needed. Update conductor, gateway and client together, preserve cell IDs, and let updated cells re-register after conductor restart. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 Verification includes standard workspace/contract tests, PostgreSQL notice scoping and persistence, original-town versus reused-hall identity, latest-game precedence, fresh-start state, and live gateway/cell checks for check/resume/ack flows. Browser smoke checks cover the explanation, inactive-town exclusion, unavailable role actions, acknowledgement failure/retry, persistence across reload, and fresh setup without entering the old simulation.
 

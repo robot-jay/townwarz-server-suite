@@ -61,9 +61,9 @@ The original `/ws` endpoint remains an anonymous debug entry and does not create
 
 ## Game server
 
-Run PostgreSQL and the Rust services from this repository's root: NATS, conductor, registered cell servers, and gateway. The conductor applies its idempotent schema migration on startup. See the [root setup instructions](../README.md) for environment variables and Rust commands. Towns now use PostgreSQL instead of the old JetStream KV prototype.
+Run PostgreSQL, the explicit `twz-migrate up` deployment step, and the Rust services from this repository's root: NATS, conductor, registered cell servers, and gateway. The conductor checks schema compatibility and performs no migrations/container supervision. See the [root setup instructions](../README.md) and [deployment contract](../DEPLOYMENT.md) for independent workload configuration. Towns use PostgreSQL instead of the old JetStream KV prototype.
 
-The local gateway defaults to `ws://localhost:8081/play`. Its Docker supervisor config uses **8080**, so set `VITE_GAME_WS_URL=ws://localhost:8080/play` for that setup. The client talks only to the gateway; it does not need direct access to PostgreSQL, NATS, conductor, or individual cell servers.
+The local gateway defaults to `ws://localhost:8081/play`. Set `VITE_GAME_WS_URL` to the gateway's actual public endpoint for independently managed deployments. The client talks only to the gateway; it does not need direct access to PostgreSQL, NATS, conductor, or individual cell servers.
 
 ## Controls & behavior
 
@@ -134,6 +134,6 @@ Allegiance is town-based; anonymous debug players are independent enemies. Comba
 
 Catalog version 2 snapshots include `buildings`, with instance IDs, ownership, health, footprint, collision and visual bounds, and town names. The renderer uses these instead of terrain-tile hall markers. A hall reserves 144x144 pixels; its 144x96 body is solid and its bottom 144x48 row is walkable. Neutral halls remain physical after release. Friendly projectiles pass through owned buildings; hostile/neutral bodies block them.
 
-The server applies `002_reconnect.sql` automatically. Rebuild/restart conductor, gateway and all cells together; no additional frontend .env settings are needed. See the server's `PHASE2.md` for checkpoint behavior, lifecycle fencing and promotion integration points.
+Run the separate `twz-migrate up` deployment step before installing the lifecycle protocol. Rebuild/restart conductor, gateway and all cells together when that protocol changes; no additional frontend .env settings are needed. See [PHASE2.md](../PHASE2.md) for checkpoint behavior/lifecycle fencing and [DEPLOYMENT.md](../DEPLOYMENT.md) for migration and workload responsibilities.
 
 These are domain/state foundations; construction, production, pickups and inventory controls are later phases. See the server suite's `PHASE1.md` for authority boundaries and the future teammate/assist reward model.

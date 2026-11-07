@@ -14,11 +14,8 @@ pub struct TownRegistry {
 }
 
 impl TownRegistry {
-    pub async fn new(nats: async_nats::Client, database_url: &str) -> Result<Self> {
-        Ok(Self {
-            nats,
-            games: GameRepository::connect(database_url).await?,
-        })
+    pub fn new(nats: async_nats::Client, games: GameRepository) -> Self {
+        Self { nats, games }
     }
 
     pub async fn serve(self, routing: crate::AppState) -> Result<()> {

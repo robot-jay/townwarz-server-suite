@@ -15,9 +15,9 @@ Phase 3a's rules are recorded in [ROADMAP.md](ROADMAP.md). This phase implements
 
 ## Authority and persistence
 
-Migration `004_economy.sql` adds nullable `twz_games.economy_json`. It is automatically applied by `GameRepository` with the existing migration lock. The durable record contains cash, income progress, connection-scoped cumulative eligible time, revision, pinned home-cell authority, purchased buildings with original prices, and request outcomes. An ended game's record remains historical; it is excluded from recovery projections.
+Migration `twz-migrate/migrations/004_economy.sql` adds nullable `twz_games.economy_json`. The separate `twz-migrate up` deployment command now applies migrations under the migration/allocation locks; `GameRepository` only validates runtime schema compatibility. The durable record contains cash, income progress, connection-scoped cumulative eligible time, revision, pinned home-cell authority, purchased buildings with original prices, and request outcomes. An ended game's record remains historical; it is excluded from recovery projections.
 
-Final regression verification also identified the cause of the previously intermittent expiry-history failure: a VM/database wall-clock correction reordered `started_at` timestamps. Migration `005_participation_order.sql` adds a sequence-backed participation order; latest participation and previous-hall selection use it instead of wall-clock time. Existing history is backfilled using its recorded timestamps, and subsequent ordering is monotonic. Migration startup also takes the allocation lock so sequence initialization cannot race new game creation.
+Final regression verification also identified the cause of the previously intermittent expiry-history failure: a VM/database wall-clock correction reordered `started_at` timestamps. Migration `005_participation_order.sql` adds a sequence-backed participation order; latest participation and previous-hall selection use it instead of wall-clock time. Existing history is backfilled using its recorded timestamps, and subsequent ordering is monotonic. The deployment migration runner takes the allocation lock so sequence initialization cannot race new game creation.
 
 The game row is the economic serialization boundary. SeaORM reads it `FOR UPDATE` and updates it transactionally. Economic mutations and lifecycle operations therefore cannot spend the same cash or revive an ended row concurrently. The record is initialized lazily from an existing game's checkpoint for upgrade compatibility. Once initialized, its cash overrides movement-checkpoint cash on resume. Subsequent movement snapshots cannot overwrite the durable economic state.
 
@@ -81,7 +81,7 @@ TWZ_MAYOR_INCOME_INTERVAL_MS=3000
 
 The amount must fit the checked wallet limit and the interval must be positive. Defaults are the normal gameplay values above. These are not `VITE_*` settings. The CI live construction fixture uses 55,000 per 1,000 ms to exercise normal catalog prices quickly.
 
-Rebuild/restart conductor, gateway and cells together when installing Phase 3b, preserving cell IDs. The conductor applies migrations 004 and 005 automatically using `DATABASE_URL`. Phase 3c adds its React controls and requires its updated gateway public-message fields; that UI upgrade adds no new database migration.
+Rebuild/restart conductor, gateway and cells together when installing Phase 3b, preserving cell IDs. Run the separate `twz-migrate up` release step to apply migrations (including 004/005 and the later compatibility contract) before starting the updated conductor. Phase 3c adds its React controls and requires its updated gateway public-message fields; that UI upgrade adds no new database migration. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Verification
 

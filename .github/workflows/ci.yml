@@ -110,14 +110,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: integration
-      - name: Build live services
-        run: cargo build --locked -p twz-conductor -p twz-cellserver
+      - name: Build migration command and live services
+        run: cargo build --locked -p twz-migrate -p twz-conductor -p twz-cellserver
       - name: Install real-browser acceptance dependencies
         working-directory: twz-webclient
         run: npm ci
       - name: Install real-browser acceptance runtime
         working-directory: twz-webclient
         run: npx playwright install --with-deps chromium
+      - name: Apply deployment migrations to the isolated test database
+        run: ./target/debug/twz-migrate up
       - name: Run all service-backed tests
         run: bash .github/scripts/integration.sh
       - name: Upload service logs on failure
