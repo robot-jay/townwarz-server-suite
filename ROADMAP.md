@@ -9,8 +9,9 @@
 | Phase 3a — Construction decisions | Complete; agreed rules below |
 | Phase 3b — Server economy and construction | Implemented; see [PHASE3B.md](PHASE3B.md) |
 | Phase 3c — React construction UI | Implemented; see [PHASE3C.md](PHASE3C.md) |
-| Phase 3d — Integration verification and acceptance | Next task |
-| Phases 4–8 | Planned |
+| Phase 3d — Integration verification and acceptance | Complete; see [PHASE3D.md](PHASE3D.md) |
+| Phase 4 — First production/inventory/deployment loop | Next phase |
+| Phases 5–8 | Planned |
 
 Descriptions of the former "current" implementation in the original Phase 1–2 sections are historical starting-point context. Their completion documents describe the implemented behavior. Phase 3a below records the subsequent decisions that refine the original plan.
 
@@ -108,6 +109,8 @@ The current active-town refresh only removes town metadata; it would not automat
 
 **Goal:** A mayor can legitimately purchase and place infrastructure.
 
+**Status:** Complete and accepted through Phases 3a–3d. See [PHASE3D.md](PHASE3D.md) for the acceptance matrix, real-service failure tests, browser evidence and milestone limits.
+
 ### Phase 3a — Clarify and Record the Construction Rules
 
 **Status:** Complete. The following decisions are the implementation contract for Phases 3b–3d.
@@ -159,7 +162,7 @@ No further gameplay decisions are outstanding for Phase 3b. Database schema and 
 
 ### Phase 3b — Implement Server Economy and Construction
 
-**Status:** Implemented. See [PHASE3B.md](PHASE3B.md) for the economic transaction/recovery boundary, shared protocol, configuration and server verification. UI-level completion remains Phase 3c–3d.
+**Status:** Implemented. See [PHASE3B.md](PHASE3B.md) for the economic transaction/recovery boundary, shared protocol, configuration and server verification. UI and integration acceptance are completed in Phases 3c–3d.
 
 Add authoritative Mayor income using the Phase 3a eligibility/timing rules, including state needed to preserve timing through handoff and reconnect. Apply the agreed development tuning, authority boundary, and recovery policy.
 
@@ -193,7 +196,7 @@ Validate:
 
 ### Phase 3c — Implement the React Construction UI
 
-**Status:** Implemented. See [PHASE3C.md](PHASE3C.md) for controls, protocol metadata, safe command replay, browser coverage and deployment. Phase 3d remains the broader integration/failure-window acceptance task.
+**Status:** Implemented. See [PHASE3C.md](PHASE3C.md) for controls, protocol metadata, safe command replay, browser coverage and deployment. Broader integration/failure-window acceptance is completed in [Phase 3d](PHASE3D.md).
 
 Add:
 
@@ -210,6 +213,8 @@ Add:
 **Completion criterion:** A player can inspect server-defined prices/restrictions, preview placement, submit construction or demolition, and see authoritative results and errors.
 
 ### Phase 3d — Integration Verification and Acceptance
+
+**Status:** Complete. The real-stack browser, process-crash/restart, lost-acknowledgement, concurrency, income/respawn/reconnect/handoff, and lifecycle/reused-hall checks are implemented and passing; see [PHASE3D.md](PHASE3D.md). These checks run in monorepo CI.
 
 - Exercise the full income → Wall Research purchase → Wall Factory purchase flow through the authenticated gateway and real cell simulation.
 - Verify failed/replayed requests cannot create extra buildings or spend twice, and competing placements cannot overlap.

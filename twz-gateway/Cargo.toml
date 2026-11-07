@@ -19,3 +19,8 @@ twz-shared = { path = "../twz-shared" }
 anyhow = "1.0"
 jsonwebtoken = { version = "9", default-features = false }
 dotenvy = "0.15"
+
+[dev-dependencies]
+# Acceptance fixtures inspect durable outcomes and establish database failure
+# barriers; application persistence remains exclusively in the conductor.
+sea-orm = { version = "1.1.19", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "with-json"] }

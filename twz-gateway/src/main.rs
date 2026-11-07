@@ -489,4 +489,6 @@ pub fn health_router() -> Router {
 }
 
 #[cfg(test)]
+mod acceptance_tests;
+#[cfg(test)]
 mod tests;

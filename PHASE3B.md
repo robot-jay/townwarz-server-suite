@@ -1,6 +1,7 @@
 # Phase 3b — authoritative income and durable construction
 
 > Phase 3c's React controls are now implemented. See [PHASE3C.md](PHASE3C.md) for the UI and the additional provenance/known-outcome fields below.
+> Phase 3d now verifies the commit/application/acknowledgement failure windows using real process restarts, database barriers and a loss-injecting test proxy. See [PHASE3D.md](PHASE3D.md).
 
 Phase 3a's rules are recorded in [ROADMAP.md](ROADMAP.md). This phase implements the server economy and command path. The React construction controls are Phase 3c; UI-level acceptance is Phase 3d. Manufacturing, pickups, inventory controls and Wall deployment remain Phase 4.
 
@@ -88,4 +89,4 @@ Run `cargo fmt --all -- --check`, `cargo check --workspace --locked`, and `cargo
 
 The standard tests cover eligible-time accounting, negative/edge territory bounds, research gating, original-price refunds, command-field rejection, actor/overlap checks, forecourt access, reservation rollback/stale reads, recovered cell state, terminal cleanup, and stable routing.
 
-With isolated PostgreSQL/NATS, repository tests cover transaction rollback, durable replay after reopening, stale checkpoint override, stale connection fencing, demolition persistence, ended-game exclusion, and concurrent spending. The live gateway construction test covers the real income/research/factory/refund/replay/resume path. `.github/scripts/integration.sh` runs all ignored tests in the required order and CI supplies accelerated income for the live fixture. Broader UI/fault-injection acceptance is Phase 3d.
+With isolated PostgreSQL/NATS, repository tests cover transaction rollback, durable replay after reopening, stale checkpoint override, stale connection fencing, demolition persistence, ended-game exclusion, and concurrent spending. The live gateway construction test covers the real income/research/factory/refund/replay/resume path. `.github/scripts/integration.sh` runs all ignored tests in the required order and CI supplies accelerated income for the live fixture. [Phase 3d](PHASE3D.md) adds the completed real-browser and process-failure acceptance coverage.

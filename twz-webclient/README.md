@@ -104,6 +104,8 @@ Update the gateway together with the client: the UI requires its town-wide `owne
 
 For browser verification, first run `npx playwright install chromium` from this directory, then `npm run test:browser`. The five Chromium tests mock Auth0 and game/catalog responses, so they need no real account or running Rust services. CI installs Chromium automatically and uploads failure traces/screenshots. TypeScript checking includes the browser tests and their configuration.
 
+[Phase 3d acceptance](../PHASE3D.md) also runs `tests/phase3-live.spec.ts` against real gateway/conductor/cell/PostgreSQL/NATS services. Its Rust fixture supplies the gateway URL, signed fixture ID token and Vite port; only the external Auth0 login UI is replaced. The integration CI job runs this additional scenario automatically. Live and mocked browser diagnostics use separate `test-results/live/` and `test-results/mocked/` directories.
+
 ## Structure
 
 ```text

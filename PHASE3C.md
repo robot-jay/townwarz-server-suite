@@ -1,6 +1,6 @@
 # Phase 3c — React construction UI
 
-The client now exposes Phase 3b's authoritative economy and construction commands. [ROADMAP.md](ROADMAP.md) records the gameplay rules; [PHASE3B.md](PHASE3B.md) describes their server implementation. Phase 3d remains the broader integration/failure-window acceptance task.
+The client now exposes Phase 3b's authoritative economy and construction commands. [ROADMAP.md](ROADMAP.md) records the gameplay rules; [PHASE3B.md](PHASE3B.md) describes their server implementation. [Phase 3d acceptance](PHASE3D.md) now also runs a Chromium construction flow against real game services and verifies process-recovery failure windows.
 
 ## Player flow
 

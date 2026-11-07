@@ -772,14 +772,15 @@ async fn main() -> anyhow::Result<()> {
         })
         .unwrap_or_else(|| args.bind.clone());
     let http_client = reqwest::Client::new();
+    let registration = ServerRegister {
+        server_id: args.id.clone(),
+        http_addr: format!("http://{}", advertise_addr),
+        ws_addr: format!("ws://{}", advertise_addr),
+        capacity_hint: 1000,
+    };
     http_client
         .post(format!("{}/register", &args.conductor))
-        .json(&ServerRegister {
-            server_id: args.id.clone(),
-            http_addr: format!("http://{}", advertise_addr),
-            ws_addr: format!("ws://{}", advertise_addr),
-            capacity_hint: 1000,
-        })
+        .json(&registration)
         .send()
         .await?
         .error_for_status()?;
@@ -788,6 +789,7 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
         http_client.clone(),
         args.conductor.clone(),
+        registration,
     ));
 
     tokio::spawn(game_loop(
@@ -1247,7 +1249,12 @@ async fn handle_text(
     Ok(())
 }
 
-async fn heartbeat_task(state: AppState, http: reqwest::Client, conductor: String) {
+async fn heartbeat_task(
+    state: AppState,
+    http: reqwest::Client,
+    conductor: String,
+    registration: ServerRegister,
+) {
     let mut p50 = 0.0;
     let mut p95 = 0.0;
     loop {
@@ -1256,7 +1263,7 @@ async fn heartbeat_task(state: AppState, http: reqwest::Client, conductor: Strin
             let w = state.world.read().await;
             (w.players.len(), w.bullets.len())
         };
-        let _ = http
+        let response = http
             .post(format!("{}/heartbeat", &conductor))
             .json(&Heartbeat {
                 server_id: state.server_id.clone(),
@@ -1267,6 +1274,16 @@ async fn heartbeat_task(state: AppState, http: reqwest::Client, conductor: Strin
             })
             .send()
             .await;
+        // A conductor restart loses its in-memory server directory. Preserve
+        // this cell's ID/address and restore registration without restarting it.
+        if matches!(response, Ok(ref response) if response.status() == reqwest::StatusCode::NOT_FOUND)
+        {
+            let _ = http
+                .post(format!("{}/register", &conductor))
+                .json(&registration)
+                .send()
+                .await;
+        }
         //You can update p50/p95 from tick metrics if you record them
         p50 = 0.9 * p50 + 0.1 * 33.0;
         p95 = 0.9 * p95 + 0.1 * 40.0;

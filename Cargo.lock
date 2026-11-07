@@ -3431,6 +3431,7 @@ dependencies = [
  "futures-util",
  "jsonwebtoken",
  "reqwest",
+ "sea-orm",
  "serde",
  "serde_json",
  "tokio",

@@ -255,7 +255,9 @@ impl World {
         let player = self
             .players
             .get(&game_id)
-            .ok_or(ConstructionError::InactiveGame)?;
+            // The conductor has already fenced inactive games/connections. A
+            // live Mayor hosted on another cell is outside this home territory.
+            .ok_or(ConstructionError::OutsideTerritory)?;
         if player.game.identity.role != Some(PlayerRole::Mayor)
             || player.game.identity.town_id.as_deref() != Some(&preparation.projection.town.id)
         {

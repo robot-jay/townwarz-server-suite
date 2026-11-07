@@ -70,7 +70,7 @@ jobs:
         run: cargo test --workspace --locked
 
   integration:
-    name: PostgreSQL, NATS and live two-cell tests
+    name: PostgreSQL, recovery and real-browser acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
@@ -102,11 +102,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: twz-webclient/package-lock.json
       - uses: Swatinem/rust-cache@v2
         with:
           key: integration
       - name: Build live services
         run: cargo build --locked -p twz-conductor -p twz-cellserver
+      - name: Install real-browser acceptance dependencies
+        working-directory: twz-webclient
+        run: npm ci
+      - name: Install real-browser acceptance runtime
+        working-directory: twz-webclient
+        run: npx playwright install --with-deps chromium
       - name: Run all service-backed tests
         run: bash .github/scripts/integration.sh
       - name: Upload service logs on failure
@@ -114,6 +125,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: integration-service-logs
-          path: target/ci-logs/
+          path: |
+            target/ci-logs/
+            twz-webclient/test-results/
           if-no-files-found: ignore
           retention-days: 7
