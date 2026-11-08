@@ -8,6 +8,6 @@ WHERE auth0_sub = $1
       disconnected_at IS NULL
       OR disconnected_at > NOW() - ($2::bigint * INTERVAL '1 second')
   )
-ORDER BY started_at DESC
+ORDER BY participation_order DESC
 LIMIT 1
 FOR UPDATE

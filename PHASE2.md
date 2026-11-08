@@ -1,5 +1,7 @@
 # Phase 2: physical buildings and reconnect lifecycle
 
+> Phase 3b now durably records purchased infrastructure and economic effects; its recovery protocol supersedes the in-memory-only limitation below for those purchases. See [PHASE3B.md](PHASE3B.md). Production/deployment recovery and general cross-cell replication remain later work.
+
 ## Agreed behavior
 
 - Townhalls occupy a **3x3 tile / 144x144 pixel** reserved footprint. The **144x96 pixel upper body** blocks movement and hostile projectiles. The bottom **144x48 pixel row is a walkable forecourt**, still reserved against construction overlap.

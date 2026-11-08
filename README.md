@@ -25,6 +25,8 @@ Before starting Vite, copy `twz-webclient/.env.example` to `twz-webclient/.env` 
 
 Persistence is implemented with SeaORM behind a repository boundary. See [PERSISTENCE.md](PERSISTENCE.md) for entities, transaction/locking guarantees, configuration and database tests.
 
+Phase 3 is complete: connected Mayor income, durable Wall Research/Factory purchases, town territories, replay protection, original-price demolition refunds and the React construction UI. See [PHASE3B.md](PHASE3B.md) for the server, [PHASE3C.md](PHASE3C.md) for controls, and [PHASE3D.md](PHASE3D.md) for real-service/browser and failure-window acceptance. [ROADMAP.md](ROADMAP.md) tracks the agreed milestones; Phase 4's production/inventory/deployment loop is next.
+
 Returning after an expired grace period now displays a named, acknowledge-once explanation before normal new-game setup. See [EXPIRY_ENTRY.md](EXPIRY_ENTRY.md) for the expired-game entry flow and future 1-Mayor/4-Commando rejoin contract.
 
 See [PHASE2.md](PHASE2.md) for physical neutral/owned townhalls, exact 3x3/96px-body/48px-forecourt geometry, building occupancy/collision, and the **15-minute same-game reconnect lifecycle**. Intentional quitting uses a no-successor release until promotion candidates are implemented.
@@ -74,7 +76,7 @@ npm --prefix twz-webclient test
 npm --prefix twz-webclient run build
 ```
 
-The root [GitHub Actions workflow](.github/workflows/ci.yml) runs client tests and production build, Rust formatting/compile/workspace tests, and isolated PostgreSQL/NATS/live two-cell integration tests on every PR update and every push to `master`. Client dependencies are installed from `twz-webclient/package-lock.json`. GitHub only discovers workflows in the repository-root `.github/workflows/` directory. No Auth0 secrets are required for CI.
+The root [GitHub Actions workflow](.github/workflows/ci.yml) runs client unit and Chromium browser tests, production build, Rust formatting/compile/workspace tests, and isolated PostgreSQL/NATS/live two-cell integration tests on every PR update and every push to `master`. The integration job also runs self-managed process-crash/recovery fixtures and Chromium against real game services, with signed fixture authentication. Client dependencies are installed from `twz-webclient/package-lock.json`; both browser jobs install Chromium. GitHub only discovers workflows in the repository-root `.github/workflows/` directory. No Auth0 secrets are required for CI.
 
 The PostgreSQL repository integration tests are opt-in and use unique fixture users, cleaning up their own records afterwards. Point them at an isolated development/test database; repository tests do not require NATS:
 

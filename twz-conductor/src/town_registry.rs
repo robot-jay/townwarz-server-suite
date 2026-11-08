@@ -21,7 +21,8 @@ impl TownRegistry {
         })
     }
 
-    pub async fn serve(self) -> Result<()> {
+    pub async fn serve(self, routing: crate::AppState) -> Result<()> {
+        crate::economy::serve(self.nats.clone(), self.games.clone(), routing).await?;
         let mut creates = self.nats.subscribe(SUBJ_TOWN_CREATE).await?;
         let mut resumes = self.nats.subscribe(SUBJ_GAME_RESUME).await?;
         let mut checks = self.nats.subscribe(SUBJ_GAME_CHECK).await?;

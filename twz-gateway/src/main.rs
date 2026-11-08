@@ -23,6 +23,7 @@ use twz_shared::{
 };
 
 mod auth;
+mod economy;
 mod play;
 
 #[derive(Parser, Debug)]
@@ -85,8 +86,12 @@ async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl
     ws.on_upgrade(move |client_ws| client_session(state, client_ws))
 }
 
-async fn catalog_handler() -> axum::Json<twz_shared::GameCatalog> {
-    axum::Json(game_catalog())
+async fn catalog_handler() -> impl IntoResponse {
+    // Public, read-only definitions are fetched by the SPA on a separate origin.
+    (
+        [(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        axum::Json(game_catalog()),
+    )
 }
 
 async fn play_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -227,10 +232,36 @@ where
         quit: false,
         checkpoint: resume.cloned(),
     };
+    let mut economy = lease.as_ref().map(economy::SessionEconomy::new);
+    let mut income_tick = tokio::time::interval(Duration::from_millis(500));
+    let mut economic_cash = resume.map(|state| state.game.wallet.cash).unwrap_or(0);
 
     // Main relay loop
     loop {
         tokio::select! {
+            _ = income_tick.tick(), if economy.is_some() => {
+                if let Some(economy) = &economy { economy.request(None); }
+            }
+            response = async { economy.as_mut().unwrap().responses.recv().await }, if economy.is_some() => {
+                if let Some(response) = response {
+                    if let Some(projection) = response.projection {
+                        economic_cash = projection.cash;
+                        let message = twz_shared::ConstructionClientMessage::EconomyState {
+                            cash: projection.cash, revision: projection.revision, owned_buildings: projection.buildings,
+                            territory: twz_shared::TownTerritory::for_town(&projection.town),
+                            constructible_types: twz_shared::CONSTRUCTIBLE_BUILDINGS.to_vec(), demolition_refund_percent: 25,
+                        };
+                        if c_sink.send(AxumMsg::Text(serde_json::to_string(&message).unwrap())).await.is_err() { break; }
+                    }
+                    if let Some(result) = response.result {
+                        let message = twz_shared::ConstructionClientMessage::ConstructionResult {
+                            result, outcome_known: response.error != Some(twz_shared::ConstructionError::ServiceUnavailable),
+                        };
+                        if c_sink.send(AxumMsg::Text(serde_json::to_string(&message).unwrap())).await.is_err() { break; }
+                    }
+                    if matches!(response.error, Some(twz_shared::ConstructionError::InactiveGame | twz_shared::ConstructionError::StaleConnection)) { break; }
+                } else { break; }
+            }
             // client -> backend
             message = c_stream.next() => {
                 let Some(Ok(message)) = message else { break; };
@@ -238,6 +269,20 @@ where
                 if let AxumMsg::Text(text)=&message {
                     if let Ok(value)=serde_json::from_str::<serde_json::Value>(text) {
                         if value["type"]=="pause_game" {continue;}
+                        if matches!(value["type"].as_str(), Some("place_building" | "demolish_building")) {
+                            let mut value = value;
+                            if let Some(object) = value.as_object_mut() { object.remove("v"); }
+                            let request_id = value.get("request_id").cloned().unwrap_or(serde_json::Value::Null);
+                            let command = serde_json::from_value::<twz_shared::ConstructionCommand>(value);
+                            let error = match command {
+                                Ok(command) => match &economy { Some(worker) if worker.request(Some(command.clone())) => None, Some(_) => Some(twz_shared::ConstructionError::Busy), None => Some(twz_shared::ConstructionError::InactiveGame) },
+                                Err(_) => Some(twz_shared::ConstructionError::InvalidCommand),
+                            };
+                            if let Some(error) = error {
+                                let _ = c_sink.send(AxumMsg::Text(serde_json::json!({"type":"construction_result","outcome_known":true,"result":{"request_id":request_id,"error":error,"building_id":null,"cash":economic_cash,"refund":0}}).to_string())).await;
+                            }
+                            continue;
+                        }
                         if value["type"]=="quit_game" {
                             if let Some(lease)=&lease {
                                 let request=EndGameRequest {player_id:lease.connection.player_id,connection_id:Some(lease.connection.connection_id),reason:GameEndReason::IntentionalQuit};
@@ -315,6 +360,23 @@ where
         }
     }
 
+    // Capture eligible time at socket termination, before checkpoint/close IO.
+    if let (Some(worker), Some(lease)) = (&economy, &lease) {
+        let elapsed_ms = worker.elapsed_ms();
+        worker.stop();
+        if !outcome.quit {
+            let _ = economy::request_economy(
+                &lease.nats,
+                &twz_shared::EconomyRequest {
+                    player_id: lease.connection.player_id,
+                    connection_id: lease.connection.connection_id,
+                    elapsed_ms,
+                    command: None,
+                },
+            )
+            .await;
+        }
+    }
     if lease.is_some() && !outcome.quit {
         if matches!(
             tokio::time::timeout(
@@ -426,5 +488,7 @@ pub fn health_router() -> Router {
     Router::new().route("/healthz", get(|| async { "ok" }))
 }
 
+#[cfg(test)]
+mod acceptance_tests;
 #[cfg(test)]
 mod tests;

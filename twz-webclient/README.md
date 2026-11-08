@@ -83,6 +83,7 @@ The local gateway defaults to `ws://localhost:8081/play`. Its Docker supervisor 
 npm run dev        # Local development on port 5173
 npm run typecheck  # Strict TypeScript checks
 npm test           # Domain/snapshot boundary regression tests
+npm run test:browser # Construction UI tests (dedicated Vite server on port 5176)
 npm run build      # Type-check and create dist/
 npm run preview    # Serve the production build locally
 ```
@@ -90,6 +91,20 @@ npm run preview    # Serve the production build locally
 For a static production host, publish `dist/` and configure fallback to `index.html` for Auth0 redirects. Set environment values before building; Vite embeds them in the generated assets.
 
 Client tests and the production build run in the repository-root [GitHub Actions workflow](../.github/workflows/ci.yml) alongside the Rust checks on PR updates and pushes to `master`. There is no separate client repository or nested workflow to configure.
+
+### Construction controls (Phase 3c)
+
+The in-game sidebar loads the server catalog and shows Wall Research/Factory prices, prerequisites and affordability. Personal cash appears in the HUD. Choose a building, move the pointer over the world, and click to fix its tile anchor. **Confirm placement** or **Enter** sends the purchase; **Cancel placement**, **Escape**, or right-click returns to play. Gold territory borders and a compact map show where the town can build. Green/red/amber previews explain clear, invalid or partially unseen footprints; the server remains authoritative.
+
+**Inspect & demolish** selects buildings in the world or the town-wide infrastructure list. The inspector shows original-price refunds and offers confirm/keep controls. Townhalls and foreign infrastructure are protected. Research demolition leaves existing factories valid. Factory production and deployment arrive in Phase 4.
+
+Movement/turning remains available with the canvas focused, but Space/mouse firing is disabled in tool modes. Tool changes clear held input. A timed-out/unconfirmed command is saved per participation in tab `sessionStorage`; **Retry saved request** reuses its exact ID and payload, including after reload/resume. New games and confirmed terminal departures clear it. Cash is never changed optimistically or taken from a replay's historical balance.
+
+Update the gateway together with the client: the UI requires its town-wide `owned_buildings`, economic revisions and `outcome_known` fields. `/catalog` supports public cross-origin GETs from Vite. No new Auth0 or database setup is needed for Phase 3c. See [PHASE3C.md](../PHASE3C.md) for the complete behavior/protocol notes.
+
+For browser verification, first run `npx playwright install chromium` from this directory, then `npm run test:browser`. The five Chromium tests mock Auth0 and game/catalog responses, so they need no real account or running Rust services. CI installs Chromium automatically and uploads failure traces/screenshots. TypeScript checking includes the browser tests and their configuration.
+
+[Phase 3d acceptance](../PHASE3D.md) also runs `tests/phase3-live.spec.ts` against real gateway/conductor/cell/PostgreSQL/NATS services. Its Rust fixture supplies the gateway URL, signed fixture ID token and Vite port; only the external Auth0 login UI is replaced. The integration CI job runs this additional scenario automatically. Live and mocked browser diagnostics use separate `test-results/live/` and `test-results/mocked/` directories.
 
 ## Structure
 

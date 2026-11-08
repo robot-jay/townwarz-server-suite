@@ -5,6 +5,7 @@ set -euo pipefail
 : "${TEST_DATABASE_URL:?Set TEST_DATABASE_URL to an isolated PostgreSQL database}"
 : "${TEST_NATS_URL:?Set TEST_NATS_URL to an isolated NATS server}"
 : "${TEST_CONDUCTOR_URL:?Set TEST_CONDUCTOR_URL to the local conductor URL}"
+export TEST_SERVICE_BIN_DIR="${TEST_SERVICE_BIN_DIR:-$PWD/target/debug}"
 export DATABASE_URL="$TEST_DATABASE_URL"
 mkdir -p target/ci-logs
 pids=()
@@ -37,10 +38,16 @@ else:
 PY
 
 # Mock NATS responders must finish before the real conductor subscribes to the
-# same subjects. This runs every ignored test except the live-service fixture.
+# same subjects. Live-service fixtures run after the real services are ready.
 cargo test --workspace --locked -- \
   --ignored --test-threads=1 \
-  --skip authenticated_entry_live_cells_geometry_resume_and_terminal_end
+  --skip phase3_acceptance \
+  --skip authenticated_entry_live_cells_geometry_resume_and_terminal_end \
+  --skip authenticated_construction_live_durable_purchase_replay_demolition_and_resume
+
+# These fixtures own and restart their conductor/cell children. Run them before
+# the long-lived fixture so no competing NATS responders can service a request.
+cargo test --workspace --locked phase3_acceptance -- --ignored --test-threads=1 --nocapture
 
 wait_for_http() {
   local url="$1"
@@ -80,5 +87,6 @@ done
 # The fixture creates its own gateway with local Auth0 signing keys; no secrets
 # or real Auth0 tenant are needed. Both real cells and persistence are exercised.
 cargo test --workspace --locked \
-  authenticated_entry_live_cells_geometry_resume_and_terminal_end -- \
-  --ignored --test-threads=1 --nocapture
+  authenticated_ -- \
+  --ignored --test-threads=1 --nocapture \
+  --skip authenticated_entry_verifies_user_creates_named_town_and_ends_on_disconnect

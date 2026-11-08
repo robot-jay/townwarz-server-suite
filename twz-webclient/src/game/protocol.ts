@@ -1,4 +1,5 @@
 import { isBuildingView, isPlayerAffiliation, isPlayerGameState, type BuildingView, type PlayerAffiliation, type PlayerGameState } from './domain';
+import { isConstructionStatus, type ConstructionStatus } from './construction';
 
 export type Player = [id: string, x: number, y: number, angle: number, hp: number];
 export interface Bullet { id: number; x: number; y: number; vx: number; vy: number; owner: string; born_ms: number }
@@ -10,6 +11,7 @@ export interface Town {
 export interface Snapshot {
   type: 'state'; t: number; me: string; players: Player[]; bullets: Bullet[]; tiles?: TileWindow; towns?: Town[];
   catalog_version?: number; self_state?: PlayerGameState; player_affiliations?: PlayerAffiliation[]; buildings?: BuildingView[];
+  construction?: ConstructionStatus;
 }
 export interface Input { up: boolean; down: boolean; left: boolean; right: boolean; shoot: boolean }
 export const emptyInput = (): Input => ({ up: false, down: false, left: false, right: false, shoot: false });
@@ -22,6 +24,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
       && p.length >= 5 && p.slice(1, 5).every(n => typeof n === 'number' && Number.isFinite(n)))
     && Array.isArray(s.bullets) && s.bullets.every(b => b && Number.isFinite(b.x) && Number.isFinite(b.y))
     && (s.buildings === undefined || (Array.isArray(s.buildings) && s.buildings.every(isBuildingView)))
+    && (s.construction === undefined || isConstructionStatus(s.construction))
     && (s.catalog_version === undefined || (Number.isSafeInteger(s.catalog_version) && s.catalog_version > 0))
     && (s.self_state === undefined || isPlayerGameState(s.self_state))
     && (s.player_affiliations === undefined || (Array.isArray(s.player_affiliations) && s.player_affiliations.every(isPlayerAffiliation)))

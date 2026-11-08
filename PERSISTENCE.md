@@ -2,6 +2,8 @@
 
 The conductor uses **SeaORM 1.1 / SQLx PostgreSQL** behind `GameRepository`.
 
+Phase 3b extends that boundary with `persistence/economy.rs` and migration `004_economy.sql`. A nullable per-game `economy_json` stores authoritative cash/income progress, purchased infrastructure and original prices, revisions, authority bindings, and request outcomes. Row-locked transactions serialize purchases, demolition/refunds, and lifecycle changes. Once initialized, economic cash supersedes stale movement-checkpoint cash on admission. See [PHASE3B.md](PHASE3B.md) for the preparation/commit/application and recovery protocol.
+
 ```text
 NATS commands
     -> TownRegistry: validation, command flow, lifecycle notifications
@@ -43,7 +45,7 @@ All runtime values in these statements are bound parameters. The standalone SQL 
 
 ## Schema and configuration
 
-Use the existing workspace-root `.env` and `DATABASE_URL`. The ORM refactor itself required no schema/data change. Startup applies the idempotent `001_games.sql`, `002_reconnect.sql`, and `003_expiry_notice.sql` files transactionally, protected by a separate migration advisory lock. The third migration adds the later acknowledge-once expiry notice. Entity definitions map the schema; they do not automatically recreate tables or synchronize/drop columns.
+Use the existing workspace-root `.env` and `DATABASE_URL`. The ORM refactor itself required no schema/data change. Startup applies the idempotent `001_games.sql`, `002_reconnect.sql`, `003_expiry_notice.sql`, `004_economy.sql`, and `005_participation_order.sql` files transactionally, protected by migration and allocation advisory locks. The third migration adds the acknowledge-once expiry notice; the fourth adds durable economic state; the fifth adds sequence-backed participation ordering so wall-clock corrections cannot change which game/hall was most recent. Existing history is backfilled from its recorded timestamps. Entity definitions map the schema; they do not automatically recreate tables or synchronize/drop columns.
 
 Gameplay and wire behavior remain the same: player-owned wallets, checkpoints, 15-minute reconnect grace, stale-token fencing, explicit quit, promotion hooks, and terminal Orb handling.
 

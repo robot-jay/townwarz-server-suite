@@ -15,6 +15,166 @@ use super::{
 // each concurrency test still uses independent connections and simultaneous calls.
 static FIXTURES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+#[ignore = "requires an isolated TEST_DATABASE_URL"]
+async fn postgres_economy_commit_rollback_replay_and_stale_checkpoint_recovery() -> Result<()> {
+    let _fixtures = FIXTURES.lock().await;
+    let url = std::env::var("TEST_DATABASE_URL")?;
+    let repository = GameRepository::connect(&url).await?;
+    let account = user();
+    let admission = repository
+        .create_game(&account, ClientId::new_v4(), "Durable Economy")
+        .await?;
+    let id = admission.town.mayor_player_id;
+    let token = admission.connection_id;
+    let command = ConstructionCommand::PlaceBuilding {
+        request_id: ClientId::new_v4(),
+        building_type: BuildingType::WallResearch,
+        origin_tile: IVec2 {
+            x: admission.town.hall.origin.x - 3,
+            y: admission.town.hall.origin.y,
+        },
+    };
+    let mut tx = repository.begin_economy(id, token).await?.unwrap();
+    tx.state.accrue(token, 1651000, IncomePolicy::default());
+    assert_eq!(tx.state.cash, 55000);
+    tx.commit().await?;
+    // A lost preparation/failed database transaction has no economic effects.
+    let mut uncommitted = repository.begin_economy(id, token).await?.unwrap();
+    let (building, refund) = uncommitted.state.plan(&uncommitted.town, &command).unwrap();
+    let result = uncommitted.state.apply_purchase(&command, building, refund);
+    uncommitted.state.record(command.clone(), result);
+    drop(uncommitted);
+    let mut committed = repository.begin_economy(id, token).await?.unwrap();
+    assert!(committed.state.replay(&command).is_none());
+    assert_eq!(committed.state.cash, 55000);
+    let (building, refund) = committed.state.plan(&committed.town, &command).unwrap();
+    let result = committed.state.apply_purchase(&command, building, refund);
+    let research_id = result.building_id.unwrap();
+    committed.state.record(command.clone(), result);
+    committed.commit().await?;
+    // The commit happened, but its reply/application can be lost. Another
+    // repository connection sees the durable result and reconstructed building.
+    let reopened = GameRepository::connect(&url).await?;
+    let tx = reopened.begin_economy(id, token).await?.unwrap();
+    assert_eq!(tx.state.cash, 50000);
+    assert_eq!(
+        tx.state.replay(&command).unwrap().building_id,
+        Some(research_id)
+    );
+    assert_eq!(tx.state.buildings.len(), 1);
+    drop(tx);
+    let mut old_checkpoint = admission.player_state;
+    old_checkpoint.game.wallet.cash = 999999;
+    repository
+        .update_connection(
+            &GameConnection {
+                player_id: id,
+                connection_id: token,
+                checkpoint: Some(old_checkpoint),
+            },
+            true,
+        )
+        .await?;
+    let resumed = reopened.resume_game(&account.sub).await?.unwrap();
+    assert_eq!(
+        resumed.player_state.game.wallet.cash, 50000,
+        "old movement checkpoint cannot undo spending"
+    );
+    assert!(matches!(
+        repository.begin_economy(id, token).await?,
+        Err(ConstructionError::StaleConnection)
+    ));
+    let token = resumed.connection_id;
+    let mut tx = reopened.begin_economy(id, token).await?.unwrap();
+    tx.state.accrue(token, 1999, IncomePolicy::default());
+    // The first connection left 1,000 ms partial progress; exactly another
+    // 2,000 eligible ms earns the next 100, with no disconnected-time catchup.
+    assert_eq!(tx.state.cash, 50000);
+    tx.state.accrue(token, 2000, IncomePolicy::default());
+    assert_eq!(tx.state.cash, 50100);
+    tx.commit().await?;
+    let demolition = ConstructionCommand::DemolishBuilding {
+        request_id: ClientId::new_v4(),
+        building_id: research_id,
+    };
+    let mut tx = reopened.begin_economy(id, token).await?.unwrap();
+    let (_, refund) = tx.state.plan(&tx.town, &demolition).unwrap();
+    assert_eq!(refund, 1250);
+    let result = tx.state.apply_purchase(&demolition, None, refund);
+    tx.state.record(demolition.clone(), result);
+    tx.commit().await?;
+    let tx = reopened.begin_economy(id, token).await?.unwrap();
+    assert_eq!(tx.state.cash, 51350);
+    assert_eq!(tx.state.replay(&demolition).unwrap().refund, 1250);
+    assert!(tx.state.buildings.is_empty());
+    drop(tx);
+    repository
+        .end_game(&EndGameRequest {
+            player_id: id,
+            connection_id: Some(token),
+            reason: GameEndReason::IntentionalQuit,
+        })
+        .await?;
+    assert!(!reopened
+        .economy_projections()
+        .await?
+        .iter()
+        .any(|p| p.town.mayor_player_id == id));
+    assert!(matches!(
+        repository.begin_economy(id, token).await?,
+        Err(ConstructionError::InactiveGame)
+    ));
+    cleanup(&repository, &[&account.sub]).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an isolated TEST_DATABASE_URL"]
+async fn postgres_economy_concurrent_spending_is_serialized_by_the_game_row() -> Result<()> {
+    let _fixtures = FIXTURES.lock().await;
+    let repository = GameRepository::connect(&std::env::var("TEST_DATABASE_URL")?).await?;
+    let account = user();
+    let admission = repository
+        .create_game(&account, ClientId::new_v4(), "Concurrent Economy")
+        .await?;
+    let id = admission.town.mayor_player_id;
+    let token = admission.connection_id;
+    let mut tx = repository.begin_economy(id, token).await?.unwrap();
+    tx.state.cash = 5000;
+    tx.commit().await?;
+    async fn purchase(repository: GameRepository, id: ClientId, token: ClientId) -> Result<bool> {
+        let mut tx = repository.begin_economy(id, token).await?.unwrap();
+        let command = ConstructionCommand::PlaceBuilding {
+            request_id: ClientId::new_v4(),
+            building_type: BuildingType::WallResearch,
+            origin_tile: tx.town.hall.origin,
+        };
+        if let Ok((building, refund)) = tx.state.plan(&tx.town, &command) {
+            let outcome = tx.state.apply_purchase(&command, building, refund);
+            tx.state.record(command, outcome);
+            tx.commit().await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    let (first, second) = tokio::join!(
+        purchase(repository.clone(), id, token),
+        purchase(repository.clone(), id, token)
+    );
+    assert_ne!(
+        first?, second?,
+        "only one of two individually affordable purchases can spend the same cash"
+    );
+    let tx = repository.begin_economy(id, token).await?.unwrap();
+    assert_eq!(tx.state.cash, 0);
+    assert_eq!(tx.state.buildings.len(), 1);
+    drop(tx);
+    cleanup(&repository, &[&account.sub]).await?;
+    Ok(())
+}
+
 fn user() -> GameUser {
     GameUser {
         sub: format!("integration|{}", ClientId::new_v4()),
@@ -343,6 +503,16 @@ async fn postgres_expiry_notices_are_once_scoped_and_bound_to_original_town() ->
         reopened.expired_game_notice(&account.sub).await?.is_none(),
         "acknowledgement survives new connections/logins"
     );
+    // A wall-clock correction must not make this older participation latest.
+    // This deterministically reproduces the VM clock rollback seen in testing.
+    games::Entity::update_many()
+        .col_expr(
+            games::Column::StartedAt,
+            Expr::cust("CURRENT_TIMESTAMP + INTERVAL '1 day'"),
+        )
+        .filter(games::Column::PlayerId.eq(old_town.mayor_player_id.to_string()))
+        .exec(&repository.db)
+        .await?;
     let next = repository
         .create_game(&account, ClientId::new_v4(), "Fresh Participation")
         .await?;
@@ -529,6 +699,7 @@ async fn postgres_randomized_halls_avoid_previous_claims_and_expand_when_full() 
             mayor_player_id: id,
         };
         let mut history = base.clone().into_active_model();
+        history.participation_order = sea_orm::ActiveValue::NotSet;
         history.player_id = Set(id.to_string());
         history.town_id = Set(town.id.clone());
         history.town_name = Set(town.name.clone());
@@ -570,6 +741,7 @@ async fn postgres_randomized_halls_avoid_previous_claims_and_expand_when_full() 
             mayor_player_id: id,
         };
         let mut occupied = base.clone().into_active_model();
+        occupied.participation_order = sea_orm::ActiveValue::NotSet;
         occupied.player_id = Set(id.to_string());
         occupied.auth0_sub = Set(owner.sub.clone());
         occupied.town_id = Set(town.id.clone());

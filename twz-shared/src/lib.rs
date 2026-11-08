@@ -3,6 +3,8 @@ use uuid::Uuid;
 
 pub mod domain;
 pub use domain::*;
+mod economy;
+pub use economy::*;
 
 pub type ClientId = Uuid;
 

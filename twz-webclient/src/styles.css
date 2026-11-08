@@ -10,3 +10,44 @@
 @media(max-width:640px){.onboarding{margin:40px auto}.onboarding-heading{align-items:flex-start;flex-direction:column;gap:10px}.setup-steps{gap:12px;margin-bottom:30px}.setup-steps li{font-size:7px;letter-spacing:.5px;flex:1}.setup-steps li span{display:block;margin:0 0 8px}.role-grid{grid-template-columns:1fr;gap:15px}.role-card{min-height:280px;padding:24px}.town-setup{padding:24px}.town-setup input{font-size:16px}.setup-actions{gap:12px;align-items:stretch;flex-direction:column-reverse}.setup-actions .primary{min-width:0}.game-header .session{gap:7px}.game-header .connection{font-size:0;gap:0}.game-header .connection .dot{margin-right:3px}.ended-game{padding:24px}}
 .existing-town-name{color:#dfbb78;overflow-wrap:anywhere;font-size:32px;margin:20px 0}
 .expired-role-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:20px 0}.expired-role-grid button{display:flex;flex-direction:column;gap:8px;text-align:left;padding:16px;white-space:normal}.expired-role-grid strong{font-size:18px;color:#dfbb78}.expired-role-grid small{color:#91a092}.expired-role-grid button:disabled{cursor:not-allowed;opacity:.65;transform:none}
+
+.wallet-hud{display:flex;align-items:center;gap:12px;color:#dfbb78;font-variant-numeric:tabular-nums}
+.wallet-hud>span{font-size:9px;letter-spacing:1.4px;color:#a0b09c}.wallet-hud strong{font-size:20px;line-height:1}
+.construction-layout{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;flex:1;min-height:0}
+.construction-layout>.viewport{min-width:0;min-height:240px}
+.construction-panel{min-height:0;min-width:0;overflow-y:auto;overscroll-behavior:contain;padding:18px;background:#15251c;border:1px solid #a1b58e33;scrollbar-color:#566a50 #15251c}
+.construction-panel h2{font-size:28px;margin:8px 0 18px;line-height:1.05}.construction-panel h3{font-size:14px;font-weight:600;margin:0 0 10px;color:#f0eadc}
+.construction-panel p{font-size:12px;line-height:1.55;margin:0 0 12px}.construction-panel .field-help{font-size:11px;margin:8px 0 12px;color:#9aaf95}
+.construction-panel .eyebrow{font-size:9px;letter-spacing:1.5px}.construction-panel button:disabled{cursor:not-allowed;transform:none;opacity:.55}
+.construction-heading{display:flex;justify-content:space-between}.building-catalog{display:flex;flex-direction:column;gap:12px}
+.building-option{border:1px solid #ffffff20;background:#1c3022;padding:12px}.building-option.active{border-color:#dfbb78;background:#2a3b26}
+.building-option>button{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:10px;text-align:left;align-items:center;width:100%;border:0;background:none;color:#e7e8d6;padding:0}
+.building-option strong{display:block;font-size:12px;line-height:1.4}.building-option small{display:block;font-size:9px;color:#9eb297;margin-top:5px;line-height:1.4}
+.building-glyph{font-size:28px;color:#dfbb78;text-align:center}.building-price{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;text-align:right}.building-price small{font-size:7px;letter-spacing:1px;color:#dfbb78}
+.building-option .building-lock{font-size:11px;color:#e4bd82;margin:10px 0 0}.building-option .field-help{margin:10px 0 0}
+.construction-notice{border:1px solid #ffffff30;padding:12px;margin-bottom:14px;background:#243425}.construction-notice p{margin-bottom:8px}
+.construction-notice.success{border-color:#9ac98688;color:#c6e3b9}.construction-notice.error{border-color:#df8e7a88;color:#f0b3a2}.construction-notice.uncertain{border-color:#dfbb7888;color:#efce94}
+.construction-notice .text-button{padding:2px 0;font-size:11px}.construction-restriction{padding:10px 12px;background:#dfbb7810;border-left:2px solid #dfbb78;color:#dfc594}
+.construction-wait{display:flex;gap:10px;align-items:center;color:#e8cf9f}.construction-wait .spinner{width:14px;height:14px;flex-shrink:0;border-width:2px}
+.placement-controls,.building-management{margin-top:18px;padding-top:18px;border-top:1px solid #ffffff1c}
+.placement-feedback{padding:10px;border:1px solid #ffffff20}.placement-feedback.valid{color:#b5df9d;border-color:#a5db9466}.placement-feedback.invalid{color:#f2ad99;border-color:#f0928066}.placement-feedback.unknown{color:#edcf94;border-color:#edc77666}
+.placement-anchor{font-size:10px!important;color:#adbfa5;font-variant-numeric:tabular-nums}.construction-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.construction-actions>button{flex:1 0 100%;min-width:0;text-align:center}.construction-panel .primary{font-size:12px;padding:12px 14px;display:block}
+.inspect-toggle{width:100%;text-align:center}.inspect-toggle[aria-pressed=true]{border-color:#8cdef0;color:#a7dce4}
+.owned-buildings{list-style:none;padding:0;margin:10px 0;display:flex;flex-direction:column;gap:7px;max-height:220px;overflow:auto}
+.owned-buildings button{width:100%;text-align:left}.owned-buildings button[aria-pressed=true]{border-color:#8cdef0;background:#8cdef015}
+.owned-buildings small{display:block;color:#91a58a;font-size:9px;margin-top:5px}.building-inspector{padding:12px;margin-top:12px;border:1px solid #8cdef044;background:#183029}
+.danger-button{border:1px solid #e09b8377;background:#542c24;color:#f4c0ac;padding:11px 12px;font-size:11px}.danger-button:hover{background:#6b3428}
+.territory-summary{display:flex;align-items:center;gap:12px;border-top:1px solid #ffffff1c;padding-top:16px;margin-top:18px}
+.territory-summary svg{width:78px;height:78px;flex-shrink:0;overflow:hidden}.territory-summary strong{font-size:10px;color:#dfbb78}
+.territory-summary p{font-size:9px;color:#a0b297;margin:5px 0}.territory-summary small{font-size:9px;line-height:1.6;color:#8eaa88;display:block}
+.construction-footnote{color:#7f9878;font-size:10px!important;margin:18px 0 0!important}.construction-canvas{cursor:crosshair}
+.tool-mode-label{position:absolute;top:12px;left:12px;max-width:calc(100% - 24px);padding:8px 10px;background:#132219e8;color:#e6c88f;border:1px solid #dfbb7855;font-size:9px;letter-spacing:1px;pointer-events:none}
+@media(max-width:1100px){.construction-layout{grid-template-columns:minmax(0,1fr) 285px;gap:12px}.construction-panel{padding:14px}.game-bottom .controls{flex-wrap:wrap}}
+@media(max-width:900px){
+  .game-shell{height:auto;min-height:100dvh}.game-main{min-height:auto}.construction-layout{display:flex;flex-direction:column;flex:none}
+  .construction-layout>.viewport{height:55dvh;min-height:280px;flex:none}.construction-panel{overflow:visible;max-height:none}
+  .building-catalog{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.construction-panel h2{margin-bottom:14px}
+  .construction-actions>button{flex:1 1 auto}.territory-summary{max-width:420px}.wallet-hud>span{font-size:8px}.game-bottom{flex-wrap:wrap}
+}
+@media(max-width:540px){.building-catalog{grid-template-columns:1fr}.wallet-hud{gap:3px;flex-direction:column;align-items:flex-end;min-width:0;max-width:58%}.wallet-hud>span{font-size:7px;letter-spacing:.7px}.wallet-hud strong{font-size:16px;max-width:100%;overflow-wrap:anywhere}.world-toolbar>.eyebrow{max-width:38%;overflow-wrap:anywhere}.construction-actions>button{flex-basis:100%}.tool-mode-label{font-size:8px}}

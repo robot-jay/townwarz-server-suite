@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b",
-    "test": "tsx --test src/game/protocol.test.ts"
+    "test": "tsx --test src/game/*.test.ts",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@auth0/auth0-react": "^2.3.0",
@@ -16,6 +17,7 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
